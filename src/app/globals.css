@@ -1,0 +1,226 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/*
+ * AVC-Anime — морская тема в морских тонах (урок релиза 1.0.11).
+ *
+ * Палитра (ТЗ §7.1, морские тона):
+ *   фон основной   #07111F   фон вторичный  #0B1728   панель   #10223A
+ *   приподнятая    #142B46   teal primary   #0D9488   тёмный   #0F766E
+ *   cyan-акцент    #38BDF8   мягкий голубой #7DD3FC   текст    #E6F0FF
+ *   втор. текст    #A8BCD4   приглушённый   #7187A3   граница  #203A57
+ *   успех #34D399  предупреждение #FBBF24  ошибка #FB7185
+ *
+ * УРОК РЕЛИЗА 1.0.11 («лагающее говно»): анимированная аквариумная тема с
+ * blur(70px) × 4 слоя + mix-blend-mode: screen + backdrop-filter на всех
+ * панелях превращала рендерер в слайдшоу на слабых GPU — и в браузерном
+ * превью, и в EXE (первая отрисовка окна растягивалась на десятки секунд).
+ * НОВАЯ ТЕМА: статичные CSS-градиенты (рисуются один раз, ноль анимаций),
+ * никаких filter/mix-blend/backdrop-filter. Выглядит по-прежнему «море»:
+ * глубина, свет у поверхности, свечение панелей — но цена рендера нулевая.
+ *
+ * Морская — тема по умолчанию (:root). Светлой темы в приложении нет,
+ * поэтому .dark зеркалит :root (переключатель не предусмотрен — честно).
+ */
+:root {
+  --radius: 0.625rem;
+  --background: #07111f;
+  --foreground: #e6f0ff;
+  /* Карточки полупрозрачные — сквозь них проступает морской градиент фона */
+  --card: #10223ad9;
+  --card-foreground: #e6f0ff;
+  --popover: #142b46f2;
+  --popover-foreground: #e6f0ff;
+  --primary: #0d9488;
+  --primary-foreground: #eefcff;
+  --secondary: #0b1728;
+  --secondary-foreground: #e6f0ff;
+  --muted: #0b1728;
+  --muted-foreground: #a8bcd4;
+  --accent: #142b46;
+  --accent-foreground: #7dd3fc;
+  --destructive: #fb7185;
+  --border: #203a57;
+  --input: #203a57;
+  --ring: #38bdf8;
+  --chart-1: #38bdf8;
+  --chart-2: #34d399;
+  --chart-3: #14b8a6;
+  --chart-4: #fbbf24;
+  --chart-5: #fb7185;
+  --sidebar: #0b1728;
+  --sidebar-foreground: #e6f0ff;
+  --sidebar-primary: #0d9488;
+  --sidebar-primary-foreground: #eefcff;
+  --sidebar-accent: #142b46;
+  --sidebar-accent-foreground: #7dd3fc;
+  --sidebar-border: #203a57;
+  --sidebar-ring: #38bdf8;
+}
+
+.dark {
+  --background: #07111f;
+  --foreground: #e6f0ff;
+  --card: #10223ad9;
+  --card-foreground: #e6f0ff;
+  --popover: #142b46f2;
+  --popover-foreground: #e6f0ff;
+  --primary: #0d9488;
+  --primary-foreground: #eefcff;
+  --secondary: #0b1728;
+  --secondary-foreground: #e6f0ff;
+  --muted: #0b1728;
+  --muted-foreground: #a8bcd4;
+  --accent: #142b46;
+  --accent-foreground: #7dd3fc;
+  --destructive: #fb7185;
+  --border: #203a57;
+  --input: #203a57;
+  --ring: #38bdf8;
+  --chart-1: #38bdf8;
+  --chart-2: #34d399;
+  --chart-3: #14b8a6;
+  --chart-4: #fbbf24;
+  --chart-5: #fb7185;
+  --sidebar: #0b1728;
+  --sidebar-foreground: #e6f0ff;
+  --sidebar-primary: #0d9488;
+  --sidebar-primary-foreground: #eefcff;
+  --sidebar-accent: #142b46;
+  --sidebar-accent-foreground: #7dd3fc;
+  --sidebar-border: #203a57;
+  --sidebar-ring: #38bdf8;
+}
+
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  ::selection {
+    background: rgba(56, 189, 248, 0.32); /* cyan-акцент */
+    color: #eef4ff;
+  }
+}
+
+/* Anime Voice Controller — кастомный скроллбар (cyan на морском, тонкий) */
+.avc-scroll {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(56, 189, 248, 0.35) transparent;
+}
+.avc-scroll::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.avc-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.avc-scroll::-webkit-scrollbar-thumb {
+  background: rgba(56, 189, 248, 0.3);
+  border-radius: 8px;
+}
+.avc-scroll::-webkit-scrollbar-thumb:hover {
+  background: rgba(56, 189, 248, 0.55);
+}
+.avc-scroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
+
+/* ============================================================
+ * МОРЕ — статичный подводный градиент (урок релиза 1.0.11)
+ * ============================================================
+ * Один div с многослойным CSS-градиентом: глубина (свет у поверхности
+ * → бездна) + мягкие свечения (teal/cyan) + виньетка. Рисуется один раз,
+ * не анимируется, не содержит filter/mix-blend/backdrop-filter —
+ * нулевая нагрузка на GPU в любом браузере и в EXE.
+ */
+
+.sea-bg {
+  background:
+    /* свет «поверхности» сверху */
+    radial-gradient(120% 55% at 50% -8%, rgba(125, 211, 252, 0.16) 0%, rgba(125, 211, 252, 0) 60%),
+    /* мягкое teal-свечение слева */
+    radial-gradient(58% 42% at 8% 30%, rgba(20, 184, 166, 0.13) 0%, rgba(20, 184, 166, 0) 70%),
+    /* глубокое cyan-свечение справа */
+    radial-gradient(62% 48% at 94% 22%, rgba(56, 189, 248, 0.11) 0%, rgba(56, 189, 248, 0) 70%),
+    /* холодная подсветка дна */
+    radial-gradient(90% 36% at 50% 104%, rgba(13, 148, 136, 0.12) 0%, rgba(13, 148, 136, 0) 72%),
+    /* глубина: светлее у поверхности — бездна внизу */
+    linear-gradient(
+      180deg,
+      #0b2c4d 0%,
+      #0a2340 14%,
+      #081a30 32%,
+      #07111f 55%,
+      #050d18 100%
+    );
+}
+
+/* Виньетка поверх градиента: края темнее, контент «выпрыгивает» (статично) */
+.sea-vignette {
+  background:
+    radial-gradient(120% 90% at 50% 8%, rgba(0, 0, 0, 0) 52%, rgba(3, 9, 17, 0.42) 100%),
+    linear-gradient(180deg, rgba(3, 9, 17, 0) 70%, rgba(3, 9, 17, 0.5) 100%);
+}
+
+/* «Морское стекло» для каркаса (шапка, панели, футер): полупрозрачная панель.
+   БЕЗ backdrop-filter (урок 1.0.11): фон статичен, размытие ничего не даёт,
+   а стоит дорого на слабых GPU. */
+.glass {
+  background: linear-gradient(
+    180deg,
+    rgba(13, 30, 52, 0.72),
+    rgba(7, 17, 31, 0.82)
+  );
+}
+
+/* Свечение заголовка как отражение света в воде (дешёвый text-shadow) */
+.avc-title-glow {
+  text-shadow:
+    0 0 18px rgba(56, 189, 248, 0.35),
+    0 0 42px rgba(56, 189, 248, 0.14);
+}

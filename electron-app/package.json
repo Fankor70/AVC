@@ -1,0 +1,21 @@
+{
+  "name": "avc-anime",
+  "productName": "AVC-Anime",
+  "version": "1.1.0",
+  "private": true,
+  "description": "AVC-Anime — Anime Voice Control (YummyAnime voice-controlled client)",
+  "main": "main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "start:dev": "AVC_APP_URL=http://localhost:3000 electron .",
+    "auth:test": "electron . --auth-selftest",
+    "dist": "electron-builder --win portable --config electron-builder.json"
+  },
+  "devDependencies": {
+    "electron": "33.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "dependencies": {
+    "sherpa-onnx-node": "^1.13.8"
+  }
+}

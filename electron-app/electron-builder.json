@@ -1,0 +1,55 @@
+{
+  "appId": "ru.avcanime.app",
+  "productName": "AVC-Anime",
+  "directories": {
+    "output": "dist",
+    "buildResources": "build"
+  },
+  "files": [
+    "main.cjs",
+    "preload.cjs",
+    "splash.html",
+    "splash-preload.cjs",
+    "auth/**",
+    "package.json",
+    "!node_modules/**",
+    "!**/*.map"
+  ],
+  "extraResources": [
+    {
+      "from": "../.next/standalone",
+      "to": "next-app"
+    },
+    {
+      "from": "../.next/static",
+      "to": "next-app/.next/static"
+    },
+    {
+      "from": "../public",
+      "to": "next-app/public"
+    },
+    {
+      "from": "../db",
+      "to": "db"
+    },
+    {
+      "from": "../node_modules/.prisma",
+      "to": "next-app/node_modules/.prisma"
+    },
+    {
+      "from": "ai-pack",
+      "to": ".",
+      "filter": [
+        "ai/**",
+        "runtime-node/**"
+      ]
+    }
+  ],
+  "win": {
+    "target": ["portable"],
+    "artifactName": "AVC-Anime-Portable-${version}.exe"
+  },
+  "portable": {
+    "artifactName": "AVC-Anime-Portable-${version}.exe"
+  }
+}

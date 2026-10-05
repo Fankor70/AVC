@@ -1,0 +1,44 @@
+{
+  "ranAt": "2026-10-03T22:00:59.191Z",
+  "platform": "linux",
+  "electron": "33.2.0",
+  "workerStarted": true,
+  "models": [
+    {
+      "key": "stt",
+      "installed": true
+    },
+    {
+      "key": "vad",
+      "installed": true
+    },
+    {
+      "key": "tts",
+      "installed": true
+    },
+    {
+      "key": "llm",
+      "installed": true
+    }
+  ],
+  "services": {
+    "stt": true,
+    "llm": true,
+    "tts": true
+  },
+  "loopTest": {
+    "partials": 4,
+    "partialTexts": [
+      "пау",
+      "пау",
+      "пау",
+      "пауза"
+    ],
+    "rawFirst": "{\"utteranceId\":1,\"text\":\"пау\",\"ms\":891,\"earlyCommand\":\"Pause\"}",
+    "finalText": "пауза",
+    "earlyCommand": "Pause",
+    "sttUtterances": 1,
+    "sttLastFinalMs": 1303,
+    "sttError": null
+  }
+}

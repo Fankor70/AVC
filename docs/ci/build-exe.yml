@@ -1,0 +1,15 @@
+# Build Windows EXE — workflow
+
+**Настоящий файл CI**: [`.github/workflows/build-exe.yml`](../.github/workflows/build-exe.yml)
+(GitHub Actions выполняет ТОЛЬКО workflow-файлы из `.github/workflows/`).
+
+⚠️ УРОК РЕЛИЗА 1.0.18: раньше здесь лежала ПОЛНАЯ копия workflow — правки вносили
+в неё, реальный CI продолжал работать по-старому (v1.0.17 вышел без SHA256SUMS.txt
+именно поэтому). Чтобы дрейф не повторился, здесь только указатель.
+
+Что делает workflow:
+1. Next.js UI (standalone) + Prisma/SQLite в userData.
+2. AI-пак: валидация URL моделей, чистый Node-рантайм, сборка ai-pack.
+3. `electron-builder --win portable`, версия `1.0.<run_number>`.
+4. Генерация `SHA256SUMS.txt` (Get-FileHash, sha256sum-формат) → в артефакт и в релиз.
+5. Публикация релиза `v1.0.<run_number>` (make_latest, не draft/prerelease).

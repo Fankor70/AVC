@@ -1,0 +1,726 @@
+     1→'use client'
+     2→/**
+     3→ * useVoice — клиентский голосовой слой (движки распознавания + TTS + пуш-ту-ток).
+     4→ *
+     5→ * ДВИЖКИ (выбор по settings.sttEngine, настройки читаются на старте каждой сессии):
+     6→ *   'browser' — только Web Speech API (ru-RU); нет поддержки → понятная ошибка;
+     7→ *   'server'  — сразу MediaRecorder → WAV 16 кГц mono → /api/voice/asr;
+     8→ *   'auto'    — Web Speech API, при отсутствии/сбое — серверный ASR.
+     9→ *   VoiceApi.browserEngine после старта отражает ФАКТИЧЕСКИ используемый движок.
+    10→ *
+    11→ * ЗАХВАТ МИКРОФОНА (проблема «я далеко от микрофона и мне нужно кричать»):
+    12→ *   - Серверный движок: getUserMedia(buildAudioConstraints(settings)) → WebAudio-цепочка
+    13→ *     createMicChain (highpass 70 Гц → мягкий компрессор → GainNode(micGain)) →
+    14→ *     MediaRecorder пишет destination.stream, т.е. micGain реально усиливает запись.
+    15→ *     VAD (порог = sensitivityToRms(settings.vadSensitivity)) читает тот же analyser,
+    16→ *     т.е. уже усиленный сигнал — тихая речь тоже достигает авто-стопа по тишине.
+    17→ *   - Web Speech API использует СВОЙ внутренний захват микрофона: micGain/цепочка
+    18→ *     на него повлиять не могут (ограничение платформы). Для живого индикатора
+    19→ *     уровня держим параллельно лёгкую цепочку source → analyser (только индикация).
+    20→ *
+    21→ * Push-to-talk: удержание кнопки или Ctrl+Space (глобальный хендлер в page.tsx).
+    22→ * Always-listening: после каждой обработки микрофон перезахватывается через 400 мс;
+    23→ * wake word (если включён) отфильтровывает фразы не для приложения.
+    24→ */
+    25→import { useCallback, useEffect, useRef, useState } from 'react'
+    26→import {
+    27→  buildAudioConstraints,
+    28→  bufferToBase64,
+    29→  createMicChain,
+    30→  encodeWav16kMono,
+    31→  listMicDevices,
+    32→  rmsLevel,
+    33→  sensitivityToRms,
+    34→  type MicChain,
+    35→} from '../voice/audio-utils'
+    36→import { executeText } from './executor'
+    37→import { useAvcStore, VoiceStatus } from './store'
+    38→
+    39→const SILENCE_MS = 1300
+    40→const MIN_UTTERANCE_MS = 500
+    41→const MAX_UTTERANCE_MS = 12000
+    42→const REARM_DELAY_MS = 400
+    43→const ERROR_CLEAR_MS = 4000
+    44→/** Троттлинг обновления micLevel (~10 раз/с) */
+    45→const MIC_LEVEL_INTERVAL_MS = 100
+    46→
+    47→// --- Web Speech API (минимальные типы) ---------------------------------------
+    48→
+    49→interface SpeechRecognitionAlternativeLike {
+    50→  transcript: string
+    51→}
+    52→interface SpeechRecognitionResultLike {
+    53→  isFinal: boolean
+    54→  0: SpeechRecognitionAlternativeLike
+    55→  length: number
+    56→}
+    57→interface SpeechRecognitionEventLike extends Event {
+    58→  resultIndex: number
+    59→  results: { length: number; [index: number]: SpeechRecognitionResultLike }
+    60→}
+    61→interface SpeechRecognitionErrorEventLike extends Event {
+    62→  error: string
+    63→}
+    64→interface SpeechRecognitionLike extends EventTarget {
+    65→  lang: string
+    66→  continuous: boolean
+    67→  interimResults: boolean
+    68→  maxAlternatives: number
+    69→  start(): void
+    70→  stop(): void
+    71→  abort(): void
+    72→  onresult: ((e: SpeechRecognitionEventLike) => void) | null
+    73→  onerror: ((e: SpeechRecognitionErrorEventLike) => void) | null
+    74→  onend: (() => void) | null
+    75→  onstart: (() => void) | null
+    76→}
+    77→type SpeechRecognitionCtor = new () => SpeechRecognitionLike
+    78→
+    79→function getSpeechRecognitionCtor(): SpeechRecognitionCtor | null {
+    80→  if (typeof window === 'undefined') return null
+    81→  const w = window as unknown as {
+    82→    SpeechRecognition?: SpeechRecognitionCtor
+    83→    webkitSpeechRecognition?: SpeechRecognitionCtor
+    84→  }
+    85→  return w.SpeechRecognition ?? w.webkitSpeechRecognition ?? null
+    86→}
+    87→
+    88→function pickRecorderOptions(): MediaRecorderOptions {
+    89→  if (typeof MediaRecorder !== 'undefined') {
+    90→    if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) {
+    91→      return { mimeType: 'audio/webm;codecs=opus' }
+    92→    }
+    93→    if (MediaRecorder.isTypeSupported('audio/webm')) return { mimeType: 'audio/webm' }
+    94→  }
+    95→  return {}
+    96→}
+    97→
+    98→/** Понятное сообщение об ошибке getUserMedia */
+    99→function micErrorMessage(e: unknown): string {
+   100→  const name =
+   101→    e instanceof DOMException
+   102→      ? e.name
+   103→      : e instanceof Error
+   104→        ? ((e as { name?: string }).name ?? '')
+   105→        : ''
+   106→  if (name === 'NotAllowedError' || name === 'SecurityError' || name === 'PermissionDeniedError') {
+   107→    return 'Нет доступа к микрофону. Разрешите доступ к микрофону для сайта (иконка в адресной строке) и попробуйте снова.'
+   108→  }
+   109→  if (name === 'NotFoundError' || name === 'DevicesNotFoundError' || name === 'OverconstrainedError') {
+   110→    return 'Микрофон не найден. Подключите микрофон или выберите другое устройство в настройках.'
+   111→  }
+   112→  return 'Не удалось получить доступ к микрофону. Проверьте разрешения и подключение.'
+   113→}
+   114→
+   115→export interface VoiceApi {
+   116→  voiceStatus: VoiceStatus
+   117→  voiceMessage: string
+   118→  isMicSupported: boolean
+   119→  /** Фактический движок текущей/последней сессии: true = Web Speech API, false = серверный ASR */
+   120→  browserEngine: boolean
+   121→  alwaysListening: boolean
+   122→  startPushToTalk: () => Promise<void>
+   123→  stopPushToTalkAndProcess: () => void
+   124→  toggleAlwaysListening: () => void
+   125→  setAlwaysListening: (v: boolean) => void
+   126→  speak: (text: string) => Promise<void>
+   127→  /** Живой уровень микрофона 0..1 (обновляется ~10 раз/с, пока идёт listening) */
+   128→  micLevel: number
+   129→  /** Промежуточный (не финальный) текст Web Speech API, очищается при обработке */
+   130→  interimText: string
+   131→  /** Список микрофонов (нужен permission; без него — пустой массив) */
+   132→  micDevices: MediaDeviceInfo[]
+   133→  refreshMicDevices: () => Promise<void>
+   134→}
+   135→
+   136→export function useVoice(): VoiceApi {
+   137→  const voiceStatus = useAvcStore((s) => s.voiceStatus)
+   138→  const voiceMessage = useAvcStore((s) => s.voiceMessage)
+   139→
+   140→  // При SSR считаем микрофон поддержанным (true), чтобы hydration совпадал;
+   141→  // фактическую поддержку уточняем после монтирования.
+   142→  const [isMicSupported, setIsMicSupported] = useState<boolean>(true)
+   143→  const [browserEngine, setBrowserEngine] = useState<boolean>(false)
+   144→  const [micLevel, setMicLevel] = useState<number>(0)
+   145→  const [interimText, setInterimText] = useState<string>('')
+   146→  const [micDevices, setMicDevices] = useState<MediaDeviceInfo[]>([])
+   147→  const [alwaysListening, setAlwaysListeningState] = useState(false)
+   148→
+   149→  useEffect(() => {
+   150→    setIsMicSupported(
+   151→      typeof MediaRecorder !== 'undefined' && !!navigator.mediaDevices?.getUserMedia,
+   152→    )
+   153→  }, [])
+   154→
+   155→  const refreshMicDevices = useCallback(async () => {
+   156→    setMicDevices(await listMicDevices())
+   157→  }, [])
+   158→
+   159→  useEffect(() => {
+   160→    void refreshMicDevices()
+   161→  }, [refreshMicDevices])
+   162→
+   163→  const streamRef = useRef<MediaStream | null>(null)
+   164→  /** micDeviceId, под который открыт streamRef (пересоздаём при смене устройства) */
+   165→  const streamDeviceRef = useRef<string | null>(null)
+   166→  /** Полная WebAudio-цепочка серверного движка (запись из destination.stream) */
+   167→  const chainRef = useRef<MicChain | null>(null)
+   168→  /** Лёгкая цепочка индикатора для Web Speech (source → analyser) */
+   169→  const lightChainRef = useRef<{ ctx: AudioContext; analyser: AnalyserNode } | null>(null)
+   170→  const analyserRef = useRef<AnalyserNode | null>(null)
+   171→  const rafRef = useRef<number | null>(null)
+   172→  /** Порог тишины текущей сессии (из sensitivityToRms(settings.vadSensitivity)) */
+   173→  const vadRmsRef = useRef(0.015)
+   174→  const silenceStartRef = useRef<number | null>(null)
+   175→  const lastLevelTsRef = useRef(0)
+   176→  const startedAtRef = useRef(0)
+   177→  const maxTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+   178→  const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+   179→  const rearmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+   180→  const processingRef = useRef(false)
+   181→  /** Поколение сессии: инвалидация асинхронных стартов после стопа */
+   182→  const sessionSeqRef = useRef(0)
+   183→  const recorderRef = useRef<MediaRecorder | null>(null)
+   184→  const recorderMimeRef = useRef('audio/webm')
+   185→  const chunksRef = useRef<Blob[]>([])
+   186→  const audioElRef = useRef<HTMLAudioElement | null>(null)
+   187→  const urlRef = useRef<string | null>(null)
+   188→  const mountedRef = useRef(true)
+   189→  const alwaysRef = useRef(false)
+   190→  const startRef = useRef<(() => Promise<void>) | null>(null)
+   191→  const stopRef = useRef<(() => void) | null>(null)
+   192→  // Web Speech API
+   193→  const recognitionRef = useRef<SpeechRecognitionLike | null>(null)
+   194→  const finalTranscriptRef = useRef('')
+   195→  const recognitionActiveRef = useRef(false)
+   196→
+   197→  const scheduleErrorClear = useCallback(() => {
+   198→    if (errorTimerRef.current) clearTimeout(errorTimerRef.current)
+   199→    errorTimerRef.current = setTimeout(() => {
+   200→      const st = useAvcStore.getState()
+   201→      if (st.voiceStatus === 'error') st.setVoiceStatus('idle')
+   202→    }, ERROR_CLEAR_MS)
+   203→  }, [])
+   204→
+   205→  /** Остановить raf-цикл и закрыть всю WebAudio (цепочку записи и/или индикатор) */
+   206→  const teardownAudio = useCallback(() => {
+   207→    if (rafRef.current !== null) {
+   208→      cancelAnimationFrame(rafRef.current)
+   209→      rafRef.current = null
+   210→    }
+   211→    analyserRef.current = null
+   212→    if (chainRef.current) {
+   213→      void chainRef.current.ctx.close().catch(() => undefined)
+   214→      chainRef.current = null
+   215→    }
+   216→    if (lightChainRef.current) {
+   217→      void lightChainRef.current.ctx.close().catch(() => undefined)
+   218→      lightChainRef.current = null
+   219→    }
+   220→    setMicLevel(0)
+   221→  }, [])
+   222→
+   223→  /**
+   224→   * raf-цикл: читает RMS с активного analyser.
+   225→   * micLevel обновляется с троттлингом ~10 раз/с;
+   226→   * withVad — авто-стоп по тишине (порог vadRmsRef, только серверный движок).
+   227→   */
+   228→  const startRafLoop = useCallback((withVad: boolean) => {
+   229→    silenceStartRef.current = null
+   230→    lastLevelTsRef.current = 0
+   231→    const tick = () => {
+   232→      if (!mountedRef.current) return
+   233→      const analyser = analyserRef.current
+   234→      if (!analyser) return
+   235→      const now = performance.now()
+   236→      const rms = rmsLevel(analyser)
+   237→      if (now - lastLevelTsRef.current >= MIC_LEVEL_INTERVAL_MS) {
+   238→        lastLevelTsRef.current = now
+   239→        setMicLevel(rms)
+   240→      }
+   241→      if (withVad) {
+   242→        if (rms < vadRmsRef.current) {
+   243→          if (silenceStartRef.current === null) {
+   244→            silenceStartRef.current = now
+   245→          } else if (
+   246→            now - silenceStartRef.current >= SILENCE_MS &&
+   247→            now - startedAtRef.current > MIN_UTTERANCE_MS
+   248→          ) {
+   249→            stopRef.current?.()
+   250→            return
+   251→          }
+   252→        } else {
+   253→          silenceStartRef.current = null
+   254→        }
+   255→      }
+   256→      rafRef.current = requestAnimationFrame(tick)
+   257→    }
+   258→    rafRef.current = requestAnimationFrame(tick)
+   259→  }, [])
+   260→
+   261→  const speak = useCallback(async (text: string) => {
+   262→    if (!text.trim()) return
+   263→    try {
+   264→      if (audioElRef.current) {
+   265→        audioElRef.current.pause()
+   266→        audioElRef.current = null
+   267→      }
+   268→      if (urlRef.current) {
+   269→        URL.revokeObjectURL(urlRef.current)
+   270→        urlRef.current = null
+   271→      }
+   272→      const res = await fetch('/api/voice/tts', {
+   273→        method: 'POST',
+   274→        headers: { 'Content-Type': 'application/json' },
+   275→        body: JSON.stringify({ text }),
+   276→      })
+   277→      if (!res.ok) return
+   278→      const blob = await res.blob()
+   279→      const url = URL.createObjectURL(blob)
+   280→      urlRef.current = url
+   281→      const el = new Audio(url)
+   282→      audioElRef.current = el
+   283→      void el.play().catch(() => undefined)
+   284→    } catch {
+   285→      // TTS не критичен — молча игнорируем
+   286→    }
+   287→  }, [])
+   288→
+   289→  const rearmIfNeeded = useCallback(() => {
+   290→    if (!alwaysRef.current || !mountedRef.current) return
+   291→    if (rearmTimerRef.current) clearTimeout(rearmTimerRef.current)
+   292→    rearmTimerRef.current = setTimeout(() => {
+   293→      if (alwaysRef.current && mountedRef.current && !processingRef.current) {
+   294→        void startRef.current?.()
+   295→      }
+   296→    }, REARM_DELAY_MS)
+   297→  }, [])
+   298→
+   299→  /** Общий обработчик распознанного текста (оба движка) */
+   300→  const handleRecognizedText = useCallback(
+   301→    async (rawText: string) => {
+   302→      const setVoiceStatus = useAvcStore.getState().setVoiceStatus
+   303→      try {
+   304→        setInterimText('')
+   305→        const text = rawText.trim()
+   306→        if (!text) {
+   307→          setVoiceStatus('idle', 'Речь не распознана')
+   308→          return
+   309→        }
+   310→
+   311→        const settings = useAvcStore.getState().settings
+   312→        let commandText = text
+   313→        if (alwaysRef.current && settings.wakeWordEnabled) {
+   314→          const wake = settings.wakeWord.trim().toLowerCase()
+   315→          const lower = text.toLowerCase()
+   316→          if (!wake || !lower.startsWith(wake)) {
+   317→            // фраза не для приложения — игнорируем молча
+   318→            setVoiceStatus('idle', '')
+   319→            return
+   320→          }
+   321→          commandText = text
+   322→            .slice(wake.length)
+   323→            .replace(/^[\s,.!?]+/, '')
+   324→            .trim()
+   325→          if (!commandText) {
+   326→            setVoiceStatus('idle', '')
+   327→            return
+   328→          }
+   329→        }
+   330→
+   331→        setVoiceStatus('executing', commandText)
+   332→        const result = await executeText(commandText, 'voice')
+   333→        const finalMsg = result.results[result.results.length - 1]?.message ?? ''
+   334→        setVoiceStatus('idle', finalMsg)
+   335→        if (useAvcStore.getState().settings.ttsEnabled && finalMsg) {
+   336→          void speak(finalMsg)
+   337→        }
+   338→      } catch {
+   339→        setVoiceStatus('error', 'Ошибка распознавания. Попробуйте ещё раз.')
+   340→        scheduleErrorClear()
+   341→      } finally {
+   342→        processingRef.current = false
+   343→        rearmIfNeeded()
+   344→      }
+   345→    },
+   346→    [scheduleErrorClear, speak, rearmIfNeeded],
+   347→  )
+   348→
+   349→  /** Серверный движок: webm → WAV 16 кГц mono (с micGain) → base64 → /api/voice/asr */
+   350→  const processRecording = useCallback(async () => {
+   351→    if (processingRef.current) return
+   352→    processingRef.current = true
+   353→    const setVoiceStatus = useAvcStore.getState().setVoiceStatus
+   354→    try {
+   355→      const chunks = chunksRef.current
+   356→      chunksRef.current = []
+   357→      if (chunks.length === 0) {
+   358→        setVoiceStatus('idle')
+   359→        return
+   360→      }
+   361→      const blob = new Blob(chunks, { type: recorderMimeRef.current })
+   362→      setVoiceStatus('recognizing', 'Распознаю...')
+   363→
+   364→      const settings = useAvcStore.getState().settings
+   365→      const wav = await encodeWav16kMono(blob, settings.micGain)
+   366→      const base64 = bufferToBase64(await wav.arrayBuffer())
+   367→      const res = await fetch('/api/voice/asr', {
+   368→        method: 'POST',
+   369→        headers: { 'Content-Type': 'application/json' },
+   370→        body: JSON.stringify({ audio: base64, mime: 'audio/wav' }),
+   371→      })
+   372→      if (!res.ok) {
+   373→        if (res.status >= 500) {
+   374→          throw new Error('Сервис распознавания недоступен. Попробуйте позже.')
+   375→        }
+   376→        const errData = (await res.json().catch(() => null)) as { error?: string } | null
+   377→        throw new Error(errData?.error ?? `ASR HTTP ${res.status}`)
+   378→      }
+   379→      const data = (await res.json()) as { text?: string }
+   380→      const text = (data.text ?? '').trim()
+   381→      if (!text) {
+   382→        setVoiceStatus('idle', 'Речь не распознана')
+   383→        return
+   384→      }
+   385→      await handleRecognizedText(text)
+   386→    } catch (e) {
+   387→      setVoiceStatus(
+   388→        'error',
+   389→        e instanceof Error && e.message ? e.message : 'Ошибка распознавания. Попробуйте ещё раз.',
+   390→      )
+   391→      scheduleErrorClear()
+   392→    } finally {
+   393→      processingRef.current = false
+   394→      rearmIfNeeded()
+   395→    }
+   396→  }, [scheduleErrorClear, rearmIfNeeded, handleRecognizedText])
+   397→
+   398→  /**
+   399→   * Захват микрофона с учётом настроек (constraints + выбранный deviceId).
+   400→   * Активный поток переиспользуется, пока не сменился micDeviceId.
+   401→   */
+   402→  const ensureStream = useCallback(async (): Promise<MediaStream> => {
+   403→    const settings = useAvcStore.getState().settings
+   404→    const existing = streamRef.current
+   405→    if (existing && existing.active && streamDeviceRef.current === settings.micDeviceId) {
+   406→      return existing
+   407→    }
+   408→    existing?.getTracks().forEach((t) => t.stop())
+   409→    const stream = await navigator.mediaDevices.getUserMedia({
+   410→      audio: buildAudioConstraints(settings),
+   411→    })
+   412→    streamRef.current = stream
+   413→    streamDeviceRef.current = settings.micDeviceId
+   414→    return stream
+   415→  }, [])
+   416→
+   417→  /**
+   418→   * Лёгкий индикатор уровня для Web Speech API (micGain на сам движок повлиять
+   419→   * не может — цепочка здесь только для показа micLevel).
+   420→   */
+   421→  const startLevelIndicator = useCallback(async () => {
+   422→    try {
+   423→      const stream = await ensureStream()
+   424→      if (!mountedRef.current || useAvcStore.getState().voiceStatus !== 'listening') return
+   425→      const Ctor: typeof AudioContext =
+   426→        window.AudioContext ??
+   427→        (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext
+   428→      const ctx = new Ctor()
+   429→      const source = ctx.createMediaStreamSource(stream)
+   430→      const analyser = ctx.createAnalyser()
+   431→      analyser.fftSize = 1024
+   432→      source.connect(analyser)
+   433→      lightChainRef.current = { ctx, analyser }
+   434→      analyserRef.current = analyser
+   435→      startRafLoop(false)
+   436→    } catch {
+   437→      // индикатор не критичен
+   438→    }
+   439→  }, [ensureStream, startRafLoop])
+   440→
+   441→  /** Движок 1: Web Speech API (ru-RU, interim-результаты) */
+   442→  const startBrowserSession = useCallback(
+   443→    (SRCtor: SpeechRecognitionCtor) => {
+   444→      const recognition = new SRCtor()
+   445→      recognition.lang = 'ru-RU'
+   446→      recognition.continuous = false
+   447→      recognition.interimResults = true
+   448→      recognition.maxAlternatives = 1
+   449→      finalTranscriptRef.current = ''
+   450→      recognitionActiveRef.current = true
+   451→      setBrowserEngine(true)
+   452→
+   453→      recognition.onresult = (e: SpeechRecognitionEventLike) => {
+   454→        let interim = ''
+   455→        for (let i = e.resultIndex; i < e.results.length; i++) {
+   456→          const res = e.results[i]
+   457→          if (res.isFinal) {
+   458→            finalTranscriptRef.current += ' ' + res[0].transcript
+   459→          } else {
+   460→            interim += res[0].transcript
+   461→          }
+   462→        }
+   463→        setInterimText(interim)
+   464→      }
+   465→      recognition.onerror = (e: SpeechRecognitionErrorEventLike) => {
+   466→        recognitionActiveRef.current = false
+   467→        if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+   468→          useAvcStore
+   469→            .getState()
+   470→            .setVoiceStatus(
+   471→              'error',
+   472→              'Нет доступа к микрофону. Разрешите доступ к микрофону для сайта и попробуйте снова.',
+   473→            )
+   474→          scheduleErrorClear()
+   475→        } else if (e.error === 'audio-capture') {
+   476→          useAvcStore.getState().setVoiceStatus('error', 'Микрофон не найден или не работает.')
+   477→          scheduleErrorClear()
+   478→        } else if (e.error !== 'no-speech' && e.error !== 'aborted') {
+   479→          useAvcStore.getState().setVoiceStatus('error', `Ошибка распознавания: ${e.error}`)
+   480→          scheduleErrorClear()
+   481→        }
+   482→      }
+   483→      recognition.onend = () => {
+   484→        recognitionActiveRef.current = false
+   485→        teardownAudio()
+   486→        setInterimText('')
+   487→        const transcript = finalTranscriptRef.current.trim()
+   488→        finalTranscriptRef.current = ''
+   489→        if (transcript) {
+   490→          useAvcStore.getState().setVoiceStatus('recognizing', 'Обрабатываю...')
+   491→          void handleRecognizedText(transcript)
+   492→        } else {
+   493→          const cur = useAvcStore.getState().voiceStatus
+   494→          if (cur === 'listening') useAvcStore.getState().setVoiceStatus('idle')
+   495→          rearmIfNeeded()
+   496→        }
+   497→      }
+   498→      recognitionRef.current = recognition
+   499→      recognition.start()
+   500→      startedAtRef.current = performance.now()
+   501→      useAvcStore.getState().setVoiceStatus('listening', 'Слушаю...')
+   502→      // индикатор уровня (параллельный лёгкий захват)
+   503→      void startLevelIndicator()
+   504→      // страховка: если движок «завис» без onend — прекращаем сами
+   505→      if (maxTimerRef.current) clearTimeout(maxTimerRef.current)
+   506→      maxTimerRef.current = setTimeout(() => {
+   507→        stopRef.current?.()
+   508→      }, MAX_UTTERANCE_MS)
+   509→    },
+   510→    [scheduleErrorClear, handleRecognizedText, rearmIfNeeded, startLevelIndicator, teardownAudio],
+   511→  )
+   512→
+   513→  /** Движок 2: MediaRecorder ИЗ ОБРАБОТАННОЙ цепочки + серверный ASR */
+   514→  const startServerSession = useCallback(async () => {
+   515→    const seq = sessionSeqRef.current
+   516→    try {
+   517→      const settings = useAvcStore.getState().settings
+   518→      const stream = await ensureStream()
+   519→      if (seq !== sessionSeqRef.current || !mountedRef.current) return // кнопку уже отпустили
+   520→      const chain = createMicChain(stream, settings.micGain)
+   521→      chainRef.current = chain
+   522→      analyserRef.current = chain.analyser
+   523→      setBrowserEngine(false)
+   524→
+   525→      const recorder = new MediaRecorder(chain.destination.stream, pickRecorderOptions())
+   526→      recorderMimeRef.current = recorder.mimeType || 'audio/webm'
+   527→      recorderRef.current = recorder
+   528→      chunksRef.current = []
+   529→      recorder.ondataavailable = (e: BlobEvent) => {
+   530→        if (e.data.size > 0) chunksRef.current.push(e.data)
+   531→      }
+   532→      recorder.onstop = () => {
+   533→        void processRecording()
+   534→      }
+   535→      recorder.start()
+   536→      startedAtRef.current = performance.now()
+   537→      silenceStartRef.current = null
+   538→      useAvcStore.getState().setVoiceStatus('listening', 'Слушаю...')
+   539→      startRafLoop(true)
+   540→      if (maxTimerRef.current) clearTimeout(maxTimerRef.current)
+   541→      maxTimerRef.current = setTimeout(() => {
+   542→        stopRef.current?.()
+   543→      }, MAX_UTTERANCE_MS)
+   544→    } catch (e) {
+   545→      teardownAudio()
+   546→      if (seq !== sessionSeqRef.current) return // сессию уже отменили
+   547→      useAvcStore.getState().setVoiceStatus('error', micErrorMessage(e))
+   548→      scheduleErrorClear()
+   549→    }
+   550→  }, [ensureStream, processRecording, scheduleErrorClear, startRafLoop, teardownAudio])
+   551→
+   552→  const startPushToTalk = useCallback(async () => {
+   553→    const st = useAvcStore.getState()
+   554→    if (st.voiceStatus === 'listening' || processingRef.current) return
+   555→    if (!isMicSupported) {
+   556→      st.setVoiceStatus('error', 'Микрофон не поддерживается этим браузером')
+   557→      scheduleErrorClear()
+   558→      return
+   559→    }
+   560→
+   561→    // Настройки читаются на старте каждой сессии (gain/sensitivity/движок/устройство)
+   562→    const settings = st.settings
+   563→    vadRmsRef.current = sensitivityToRms(settings.vadSensitivity)
+   564→    setInterimText('')
+   565→    const seq = ++sessionSeqRef.current
+   566→
+   567→    const SRCtor = getSpeechRecognitionCtor()
+   568→    if (settings.sttEngine === 'browser' && !SRCtor) {
+   569→      st.setVoiceStatus(
+   570→        'error',
+   571→        'Браузер не поддерживает распознавание речи (Web Speech API). Выберите движок «auto» или «server» в настройках.',
+   572→      )
+   573→      scheduleErrorClear()
+   574→      return
+   575→    }
+   576→
+   577→    // --- Движок 1: Web Speech API (ru-RU) ---
+   578→    if (SRCtor && (settings.sttEngine === 'browser' || settings.sttEngine === 'auto')) {
+   579→      try {
+   580→        startBrowserSession(SRCtor)
+   581→        return
+   582→      } catch {
+   583→        // не удалось запустить Web Speech
+   584→        recognitionRef.current = null
+   585→        recognitionActiveRef.current = false
+   586→        if (settings.sttEngine === 'browser' || seq !== sessionSeqRef.current) {
+   587→          st.setVoiceStatus('error', 'Не удалось запустить браузерное распознавание речи.')
+   588→          scheduleErrorClear()
+   589→          return
+   590→        }
+   591→        // в 'auto' — тихо падаем на серверный движок
+   592→      }
+   593→    }
+   594→
+   595→    // --- Движок 2 (fallback / 'server'): MediaRecorder + серверный ASR ---
+   596→    await startServerSession()
+   597→  }, [isMicSupported, scheduleErrorClear, startBrowserSession, startServerSession])
+   598→
+   599→  const stopPushToTalkAndProcess = useCallback(() => {
+   600→    sessionSeqRef.current++ // инвалидируем незавершённые асинхронные старты
+   601→    if (maxTimerRef.current) {
+   602→      clearTimeout(maxTimerRef.current)
+   603→      maxTimerRef.current = null
+   604→    }
+   605→    // Web Speech: остановка — результат придёт в onend
+   606→    const recognition = recognitionRef.current
+   607→    if (recognition && recognitionActiveRef.current) {
+   608→      try {
+   609→        recognition.stop()
+   610→      } catch {
+   611→        recognitionActiveRef.current = false
+   612→      }
+   613→      return
+   614→    }
+   615→    // Серверный движок: остановить запись и обработать
+   616→    teardownAudio()
+   617→    const recorder = recorderRef.current
+   618→    recorderRef.current = null
+   619→    if (recorder && recorder.state !== 'inactive') {
+   620→      recorder.stop()
+   621→    }
+   622→  }, [teardownAudio])
+   623→
+   624→  const setAlwaysListening = useCallback(
+   625→    (v: boolean) => {
+   626→      setAlwaysListeningState(v)
+   627→      alwaysRef.current = v
+   628→      const st = useAvcStore.getState()
+   629→      const mode = v ? 'always-listening' : 'push-to-talk'
+   630→      if (st.settings.voiceMode !== mode) {
+   631→        st.updateSettings({ voiceMode: mode })
+   632→        void fetch('/api/settings', {
+   633→          method: 'PUT',
+   634→          headers: { 'Content-Type': 'application/json' },
+   635→          body: JSON.stringify({ voiceMode: mode }),
+   636→        }).catch(() => undefined)
+   637→      }
+   638→      if (v) {
+   639→        void startPushToTalk()
+   640→      } else {
+   641→        if (rearmTimerRef.current) clearTimeout(rearmTimerRef.current)
+   642→        if (useAvcStore.getState().voiceStatus === 'listening') {
+   643→          stopPushToTalkAndProcess()
+   644→        }
+   645→      }
+   646→    },
+   647→    [startPushToTalk, stopPushToTalkAndProcess],
+   648→  )
+   649→
+   650→  const toggleAlwaysListening = useCallback(() => {
+   651→    setAlwaysListening(!alwaysRef.current)
+   652→  }, [setAlwaysListening])
+   653→
+   654→  // связь взаимных ссылок между колбэками (анализатор -> stop; re-arm -> start)
+   655→  useEffect(() => {
+   656→    startRef.current = startPushToTalk
+   657→    stopRef.current = stopPushToTalkAndProcess
+   658→  }, [startPushToTalk, stopPushToTalkAndProcess])
+   659→
+   660→  // при переключении режима из настроек — синхронизировать слушание
+   661→  const voiceMode = useAvcStore((s) => s.settings.voiceMode)
+   662→  useEffect(() => {
+   663→    const want = voiceMode === 'always-listening'
+   664→    if (want !== alwaysRef.current) setAlwaysListening(want)
+   665→  }, [voiceMode, setAlwaysListening])
+   666→
+   667→  // очистка при размонтировании
+   668→  useEffect(() => {
+   669→    mountedRef.current = true
+   670→    return () => {
+   671→      mountedRef.current = false
+   672→      sessionSeqRef.current++
+   673→      if (maxTimerRef.current) clearTimeout(maxTimerRef.current)
+   674→      if (errorTimerRef.current) clearTimeout(errorTimerRef.current)
+   675→      if (rearmTimerRef.current) clearTimeout(rearmTimerRef.current)
+   676→      const recognition = recognitionRef.current
+   677→      if (recognition) {
+   678→        recognition.onend = null
+   679→        recognition.onresult = null
+   680→        recognition.onerror = null
+   681→        try {
+   682→          recognition.abort()
+   683→        } catch {
+   684→          // уже остановлено
+   685→        }
+   686→      }
+   687→      recognitionRef.current = null
+   688→      teardownAudio()
+   689→      const recorder = recorderRef.current
+   690→      if (recorder && recorder.state !== 'inactive') {
+   691→        recorder.onstop = null
+   692→        recorder.stop()
+   693→      }
+   694→      recorderRef.current = null
+   695→      streamRef.current?.getTracks().forEach((t) => t.stop())
+   696→      streamRef.current = null
+   697→      streamDeviceRef.current = null
+   698→      if (audioElRef.current) {
+   699→        audioElRef.current.pause()
+   700→        audioElRef.current = null
+   701→      }
+   702→      if (urlRef.current) {
+   703→        URL.revokeObjectURL(urlRef.current)
+   704→        urlRef.current = null
+   705→      }
+   706→    }
+   707→  }, [teardownAudio])
+   708→
+   709→  return {
+   710→    voiceStatus,
+   711→    voiceMessage,
+   712→    isMicSupported,
+   713→    browserEngine,
+   714→    alwaysListening,
+   715→    startPushToTalk,
+   716→    stopPushToTalkAndProcess,
+   717→    toggleAlwaysListening,
+   718→    setAlwaysListening,
+   719→    speak,
+   720→    micLevel,
+   721→    interimText,
+   722→    micDevices,
+   723→    refreshMicDevices,
+   724→  }
+   725→}
+   726→

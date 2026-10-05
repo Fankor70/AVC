@@ -1,0 +1,1122 @@
+     1→/**
+     2→ * Command Executor — исполняет VoiceCommand[] над состоянием приложения
+     3→ * (Browser + Player Control layers). CLI-agnostic: работает только со store
+     4→ * и REST API адаптера. Импортируется только из клиентского кода.
+     5→ *
+     6→ * Пайплайн executeText:
+     7→ *   RAW → [подтверждение озвучки «да/нет» — до парсинга] → normalize (parseCommand)
+     8→ *   → [анти-дубль < 2.5 c] → [LLM fallback] → выполнение по очереди
+     9→ *   → pipeline steps → история → lastExecuted → voiceMessage
+    10→ *
+    11→ * Task 9-a: SelectVoice через Voice Provider Resolver (с подтверждением при
+    12→ * сомнительной уверенности), Mute/Unmute, SetWatchStatus/ToggleFavorite/
+    13→ * ContinueWatching/ShowLibrary/AddVoiceAlias, автосинхронизация библиотеки.
+    14→ */
+    15→import { toast } from '@/hooks/use-toast'
+    16→import { rankMatches } from '@/lib/voice/fuzzy'
+    17→import { LABELS, parseCommand } from '@/lib/voice/parser'
+    18→import {
+    19→  buildUserAliasMap,
+    20→  DEFAULT_VOICE_ALIASES,
+    21→  DubCandidate,
+    22→  resolveVoiceProvider,
+    23→} from '@/lib/voice/provider-resolver'
+    24→import { avcApi } from './api'
+    25→import type { PutLibraryPayload } from './api'
+    26→import {
+    27→  hasStickyActivation,
+    28→  playerWindowAvailable,
+    29→  sendPlayerCommand,
+    30→  storeToPlayerVolume,
+    31→} from './player-bridge'
+    32→import {
+    33→  AnimeCard,
+    34→  AnimeDetails,
+    35→  BrowserContext,
+    36→  CommandResult,
+    37→  LibraryEntryDto,
+    38→  SiteSectionId,
+    39→  TabKind,
+    40→  VideoEntry,
+    41→  VoiceCommand,
+    42→  VoiceCommandType,
+    43→  VOICE_CONFIDENCE_ASK,
+    44→  VOICE_CONFIDENCE_AUTO,
+    45→  VoiceProviderMatch,
+    46→  WATCH_STATUS_LABELS,
+    47→  WatchStatus,
+    48→} from './types'
+    49→import { makeTabSnapshot, useAvcStore } from './store'
+    50→
+    51→// --- кэш деталей (модульный, переживает переключения вкладок) ------------------
+    52→
+    53→const detailsCache = new Map<number, AnimeDetails>()
+    54→
+    55→// --- анти-дубль команд (баг #12) ------------------------------------------------
+    56→
+    57→/** Одна и та же команда подряд в пределах 2.5 с — пропускается */
+    58→const DEBOUNCE_MS = 2500
+    59→let lastCommand: { hash: string; ts: number } | null = null
+    60→
+    61→/** Быстрая нормализация для фраз подтверждения (пунктуация → пробелы) */
+    62→function simpleNormalize(text: string): string {
+    63→  return text
+    64→    .toLowerCase()
+    65→    .replace(/[^a-zа-яё0-9\s]/gi, ' ')
+    66→    .replace(/\s+/g, ' ')
+    67→    .trim()
+    68→}
+    69→
+    70→/** Голосовое подтверждение предложенной озвучки */
+    71→const CONFIRM_YES = new Set([
+    72→  'да',
+    73→  'да переключай',
+    74→  'подтверждаю',
+    75→  'точно',
+    76→  'давай',
+    77→  'первый',
+    78→  'первая',
+    79→  'первое',
+    80→  '1',
+    81→])
+    82→const CONFIRM_NO = new Set([
+    83→  'нет',
+    84→  'отмена',
+    85→  'не',
+    86→  'неа',
+    87→  'неверно',
+    88→  'второй',
+    89→  'вторая',
+    90→  'второе',
+    91→  '2',
+    92→])
+    93→
+    94→// --- служебные ----------------------------------------------------------------
+    95→
+    96→const SECTION_LABELS: Record<SiteSectionId, string> = {
+    97→  home: 'Главная',
+    98→  catalog: 'Каталог',
+    99→  ongoing: 'Онгоинги',
+   100→  announcements: 'Анонсы',
+   101→  schedule: 'Расписание',
+   102→  top100: 'ТОП-100',
+   103→  random: 'Случайное',
+   104→}
+   105→
+   106→function fail(message: string, error?: string): CommandResult {
+   107→  return { success: false, message, error }
+   108→}
+   109→
+   110→function ok(message: string, data?: unknown): CommandResult {
+   111→  return { success: true, message, data }
+   112→}
+   113→
+   114→function clamp(v: number, min: number, max: number): number {
+   115→  return Math.min(Math.max(v, min), max)
+   116→}
+   117→
+   118→async function apiGetJson<T>(url: string): Promise<T | null> {
+   119→  try {
+   120→    const res = await fetch(url)
+   121→    if (!res.ok) return null
+   122→    return (await res.json()) as T
+   123→  } catch {
+   124→    return null
+   125→  }
+   126→}
+   127→
+   128→function step(stage: 'RAW' | 'NORMALIZED' | 'COMMAND' | 'PARAMS' | 'CONFIDENCE' | 'RESULT' | 'SOURCE', text: string): void {
+   129→  useAvcStore.getState().pushPipeline([{ stage, text, ts: Date.now() }])
+   130→}
+   131→
+   132→function paramNumber(cmd: VoiceCommand, key: string): number | null {
+   133→  const v = cmd.params[key]
+   134→  if (typeof v === 'number' && Number.isFinite(v)) return v
+   135→  if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v)
+   136→  return null
+   137→}
+   138→
+   139→function paramString(cmd: VoiceCommand, key: string): string {
+   140→  const v = cmd.params[key]
+   141→  return typeof v === 'string' ? v.trim() : ''
+   142→}
+   143→
+   144→// --- детали аниме ---------------------------------------------------------------
+   145→
+   146→export async function fetchDetails(idOrSlug: number | string): Promise<AnimeDetails | null> {
+   147→  if (typeof idOrSlug === 'number') {
+   148→    const cached = detailsCache.get(idOrSlug)
+   149→    if (cached) return cached
+   150→  }
+   151→  const data = await apiGetJson<AnimeDetails>(
+   152→    `/api/site/anime/${encodeURIComponent(String(idOrSlug))}`,
+   153→  )
+   154→  if (data) detailsCache.set(data.animeId, data)
+   155→  return data
+   156→}
+   157→
+   158→export function getCachedDetails(
+   159→  animeId: number | null,
+   160→  slug: string | null,
+   161→): AnimeDetails | null {
+   162→  if (animeId !== null) {
+   163→    const c = detailsCache.get(animeId)
+   164→    if (c) return c
+   165→  }
+   166→  if (slug) {
+   167→    for (const d of detailsCache.values()) {
+   168→      if (d.slug === slug) return d
+   169→    }
+   170→  }
+   171→  return null
+   172→}
+   173→
+   174→/** Максимальный номер серии, доступный в видео-матрице/деталях */
+   175→export function maxEpisodeOf(details: AnimeDetails): number {
+   176→  if (details.episodesAired > 0) return details.episodesAired
+   177→  let max = 0
+   178→  for (const v of details.videos) max = Math.max(max, v.episode)
+   179→  return max
+   180→}
+   181→
+   182→function pickVideo(
+   183→  details: AnimeDetails,
+   184→  episode: number,
+   185→  preferDub: string | null,
+   186→): VideoEntry | null {
+   187→  const forEp = details.videos.filter((v) => v.episode === episode && !!v.iframeUrl)
+   188→  if (forEp.length === 0) return null
+   189→  if (preferDub) {
+   190→    const m = forEp.find((v) => v.dubName === preferDub)
+   191→    if (m) return m
+   192→  }
+   193→  return forEp[0]
+   194→}
+   195→
+   196→/** Записать детали открытого аниме в playback (сброс серии/озвучки) */
+   197→function applyDetailsToPlayback(details: AnimeDetails | null, card?: AnimeCard): void {
+   198→  const st = useAvcStore.getState()
+   199→  const aired = details ? maxEpisodeOf(details) : 0
+   200→  st.patchPlayback({
+   201→    animeId: details?.animeId ?? card?.animeId ?? null,
+   202→    animeTitle: details?.title ?? card?.title ?? null,
+   203→    animeSlug: details?.slug ?? card?.slug ?? null,
+   204→    episodesAired: aired > 0 ? aired : null,
+   205→    episodesTotal: details?.episodesTotal ?? null,
+   206→    currentEpisode: null,
+   207→    currentDub: null,
+   208→    isPlaying: false,
+   209→    currentTime: 0,
+   210→    duration: 0,
+   211→  })
+   212→  st.setPlayer(null, null)
+   213→}
+   214→
+   215→// --- библиотека (аккаунт) -------------------------------------------------------
+   216→
+   217→/** Заменить/добавить запись библиотеки в store */
+   218→function upsertLibraryEntry(entry: LibraryEntryDto): void {
+   219→  const st = useAvcStore.getState()
+   220→  const exists = st.library.some((e) => e.animeId === entry.animeId)
+   221→  st.setLibrary(
+   222→    exists
+   223→      ? st.library.map((e) => (e.animeId === entry.animeId ? entry : e))
+   224→      : [...st.library, entry],
+   225→  )
+   226→}
+   227→
+   228→/**
+   229→ * Автосинхронизация прогресса просмотра после открытия серии (fire-and-forget:
+   230→ * не блокирует основной поток, ошибки глушатся). Статус 'watching' передаётся
+   231→ * только при СОЗДАНИИ записи — 'completed'/'dropped' не перетираются.
+   232→ */
+   233→function syncLibraryProgress(details: AnimeDetails | null): void {
+   234→  const st = useAvcStore.getState()
+   235→  const pb = st.playback
+   236→  if (!st.user || pb.animeId === null) return
+   237→  const existing = st.library.find((e) => e.animeId === pb.animeId) ?? null
+   238→  void avcApi
+   239→    .putLibrary({
+   240→      animeId: pb.animeId,
+   241→      title: pb.animeTitle ?? existing?.title ?? 'Без названия',
+   242→      slug: pb.animeSlug ?? existing?.slug ?? null,
+   243→      poster: details?.poster ?? existing?.poster ?? null,
+   244→      ...(existing ? {} : { status: 'watching' as WatchStatus }),
+   245→      episode: pb.currentEpisode ?? existing?.episode ?? null,
+   246→      totalEpisodes: details
+   247→        ? details.episodesTotal ??
+   248→          (details.episodesAired > 0 ? details.episodesAired : (existing?.totalEpisodes ?? null))
+   249→        : (existing?.totalEpisodes ?? null),
+   250→      currentDub: pb.currentDub ?? existing?.currentDub ?? null,
+   251→    })
+   252→    .then((entry) => {
+   253→      if (entry) upsertLibraryEntry(entry)
+   254→    })
+   255→    .catch(() => undefined)
+   256→}
+   257→
+   258→type LibraryUpdateResult =
+   259→  | { ok: true; entry: LibraryEntryDto }
+   260→  | { ok: false; message: string }
+   261→
+   262→/** putLibrary для ТЕКУЩЕГО открытого аниме (статус/избранное). Без user — открывает auth. */
+   263→async function updateLibraryForCurrentAnime(patch: {
+   264→  status?: WatchStatus
+   265→  favorite?: boolean
+   266→}): Promise<LibraryUpdateResult> {
+   267→  const st = useAvcStore.getState()
+   268→  if (!st.user) {
+   269→    st.setAuthOpen(true)
+   270→    return { ok: false, message: 'Войдите в аккаунт, чтобы вести библиотеку' }
+   271→  }
+   272→  const pb = st.playback
+   273→  if (pb.animeId === null) return { ok: false, message: 'Сначала откройте аниме' }
+   274→  const existing = st.library.find((e) => e.animeId === pb.animeId) ?? null
+   275→  const details = getCachedDetails(pb.animeId, pb.animeSlug)
+   276→  const payload: PutLibraryPayload = {
+   277→    animeId: pb.animeId,
+   278→    title: pb.animeTitle ?? existing?.title ?? 'Без названия',
+   279→    slug: pb.animeSlug ?? existing?.slug ?? null,
+   280→    poster: details?.poster ?? existing?.poster ?? null,
+   281→    episode: pb.currentEpisode ?? existing?.episode ?? null,
+   282→    totalEpisodes: details
+   283→      ? details.episodesTotal ?? (details.episodesAired > 0 ? details.episodesAired : null)
+   284→      : (existing?.totalEpisodes ?? null),
+   285→    currentDub: pb.currentDub ?? existing?.currentDub ?? null,
+   286→  }
+   287→  if (patch.status !== undefined) payload.status = patch.status
+   288→  else if (!existing) payload.status = 'watching' // новая запись — базовый статус
+   289→  if (patch.favorite !== undefined) payload.favorite = patch.favorite
+   290→  try {
+   291→    const entry = await avcApi.putLibrary(payload)
+   292→    if (!entry) {
+   293→      useAvcStore.getState().setAuthOpen(true)
+   294→      return { ok: false, message: 'Войдите в аккаунт, чтобы вести библиотеку' }
+   295→    }
+   296→    upsertLibraryEntry(entry)
+   297→    return { ok: true, entry }
+   298→  } catch (e) {
+   299→    return { ok: false, message: e instanceof Error ? e.message : 'Ошибка библиотеки' }
+   300→  }
+   301→}
+   302→
+   303→/** Синхронизация playback, если вкладка аниме открыта напрямую (сессия и т.п.) */
+   304→export function syncPlaybackToDetails(details: AnimeDetails): void {
+   305→  const st = useAvcStore.getState()
+   306→  if (st.playback.animeId === details.animeId) return
+   307→  applyDetailsToPlayback(details)
+   308→}
+   309→
+   310→// --- открытие аниме / секций ---------------------------------------------------
+   311→
+   312→async function navigateToAnime(
+   313→  card: AnimeCard,
+   314→  newTab: boolean,
+   315→  prefetched?: AnimeDetails | null,
+   316→): Promise<CommandResult> {
+   317→  const st = useAvcStore.getState()
+   318→  const payload: Record<string, unknown> = { slug: card.slug, animeId: card.animeId }
+   319→  if (newTab || !st.activeTabId) {
+   320→    st.addTab({ kind: 'anime', title: card.title, payload })
+   321→  } else {
+   322→    const active = st.tabs.find((t) => t.id === st.activeTabId)
+   323→    if (active) {
+   324→      st.pushBackStack(active.id, makeTabSnapshot(active))
+   325→      st.patchTab(active.id, { kind: 'anime', title: card.title, payload })
+   326→    } else {
+   327→      st.addTab({ kind: 'anime', title: card.title, payload })
+   328→    }
+   329→  }
+   330→  const details = prefetched ?? (await fetchDetails(card.animeId))
+   331→  applyDetailsToPlayback(details, card)
+   332→  toast({ description: `Открыто: ${card.title}` })
+   333→  return ok(`Открыто: ${card.title}`, details)
+   334→}
+   335→
+   336→/** Открыть карточку аниме из сетки (клик мышью) — в новой вкладке */
+   337→export async function openAnimeCard(card: AnimeCard, newTab = true): Promise<CommandResult> {
+   338→  return navigateToAnime(card, newTab)
+   339→}
+   340→
+   341→function openSectionTab(sectionId: SiteSectionId): CommandResult {
+   342→  const st = useAvcStore.getState()
+   343→  if (sectionId === 'home') {
+   344→    st.addTab({ kind: 'home', title: SECTION_LABELS.home, payload: {} })
+   345→  } else {
+   346→    st.addTab({
+   347→      kind: 'section',
+   348→      title: SECTION_LABELS[sectionId],
+   349→      payload: { section: sectionId, page: 1 },
+   350→    })
+   351→  }
+   352→  return ok(`Открыто: ${SECTION_LABELS[sectionId]}`)
+   353→}
+   354→
+   355→const SECTION_COMMAND: Partial<Record<SiteSectionId, VoiceCommandType>> = {
+   356→  catalog: VoiceCommandType.OpenCatalog,
+   357→  ongoing: VoiceCommandType.OpenOngoing,
+   358→  announcements: VoiceCommandType.OpenAnnouncements,
+   359→  schedule: VoiceCommandType.OpenSchedule,
+   360→  top100: VoiceCommandType.OpenTop100,
+   361→}
+   362→
+   363→/** Хелпер для UI-кнопок: открыть секцию как голосовая команда */
+   364→export function openSection(sectionId: SiteSectionId): Promise<CommandResult> {
+   365→  const type =
+   366→    sectionId === 'home'
+   367→      ? VoiceCommandType.OpenHome
+   368→      : sectionId === 'random'
+   369→        ? VoiceCommandType.OpenRandom
+   370→        : SECTION_COMMAND[sectionId]
+   371→  if (!type) return Promise.resolve(fail(`Неизвестная секция: ${sectionId}`))
+   372→  return executeCommand({
+   373→    type,
+   374→    params: {},
+   375→    confidence: 1,
+   376→    label: SECTION_LABELS[sectionId],
+   377→  })
+   378→}
+   379→
+   380→// --- серии / плеер ----------------------------------------------------------------
+   381→
+   382→async function playEpisode(episode: number): Promise<CommandResult> {
+   383→  const st = useAvcStore.getState()
+   384→  const pb = st.playback
+   385→  if (!pb.animeId) return fail('Сначала откройте аниме')
+   386→  const details = await fetchDetails(pb.animeId)
+   387→  if (!details) return fail('Не удалось загрузить данные аниме')
+   388→  const max = maxEpisodeOf(details)
+   389→  if (!Number.isFinite(episode) || episode < 1 || (max > 0 && episode > max)) {
+   390→    return fail(`Серия ${episode} не найдена`)
+   391→  }
+   392→  const video = pickVideo(details, episode, pb.currentDub)
+   393→  if (!video) return fail(`Серия ${episode} не найдена`)
+   394→  st.patchPlayback({
+   395→    currentEpisode: episode,
+   396→    isPlaying: true,
+   397→    currentTime: 0,
+   398→    duration: video.duration ?? 0,
+   399→    currentDub: pb.currentDub ?? video.dubName,
+   400→  })
+   401→  st.setPlayer(video.iframeUrl, video.playerName)
+   402→  syncLibraryProgress(details)
+   403→  toast({ description: `▶ Серия ${episode}` })
+   404→  return ok(`Серия ${episode}`)
+   405→}
+   406→
+   407→// --- основной switch ------------------------------------------------------------
+   408→
+   409→async function executeOpenRandom(): Promise<CommandResult> {
+   410→  const details = await apiGetJson<AnimeDetails>('/api/site/random')
+   411→  if (!details) return fail('Не удалось получить случайное аниме')
+   412→  return navigateToAnime(details, false, details)
+   413→}
+   414→
+   415→async function executeSearchAnime(cmd: VoiceCommand): Promise<CommandResult> {
+   416→  const query = paramString(cmd, 'query')
+   417→  if (!query) return fail('Пустой поисковый запрос')
+   418→  const open = cmd.params.open === true
+   419→  const newTab = cmd.params.newTab === true
+   420→  const data = await apiGetJson<{ items: AnimeCard[] }>(
+   421→    `/api/site/search?q=${encodeURIComponent(query)}`,
+   422→  )
+   423→  const items = data?.items ?? []
+   424→  if (items.length === 0) return fail(`Ничего не найдено по запросу «${query}»`)
+   425→
+   426→  const ranked = rankMatches(query, items, (i) => i.title)
+   427→  const bestScore = ranked.length > 0 ? ranked[0].score : 0
+   428→  if ((open || items.length === 1) && bestScore >= 0.55) {
+   429→    const best = ranked[0].item
+   430→    return navigateToAnime(best, newTab)
+   431→  }
+   432→  const candidates = (ranked.length > 0 ? ranked.map((r) => r.item) : items).slice(0, 6)
+   433→  useAvcStore.getState().setPendingOptions({ query, items: candidates })
+   434→  return ok('Найдено несколько вариантов. Скажите номер.', candidates)
+   435→}
+   436→
+   437→async function executeSelectOption(cmd: VoiceCommand): Promise<CommandResult> {
+   438→  const st = useAvcStore.getState()
+   439→  const opts = st.pendingOptions
+   440→  if (!opts) return fail('Нет вариантов для выбора — сначала выполните поиск')
+   441→  const index = paramNumber(cmd, 'index')
+   442→  if (index === null) return fail('Не указан номер варианта')
+   443→  const item = opts.items[index - 1]
+   444→  if (!item) {
+   445→    return fail(`Вариант ${index} не найден. Доступно вариантов: ${opts.items.length}`)
+   446→  }
+   447→  st.setPendingOptions(null)
+   448→  return navigateToAnime(item, false)
+   449→}
+   450→
+   451→/** Применить выбранную озвучку: запомнить и, если серия открыта, перезапустить плеер */
+   452→function applyDubChoice(details: AnimeDetails, dubName: string): void {
+   453→  const st = useAvcStore.getState()
+   454→  st.patchPlayback({ currentDub: dubName })
+   455→  const ep = st.playback.currentEpisode
+   456→  if (ep !== null) {
+   457→    const video = pickVideo(details, ep, dubName)
+   458→    if (video) st.setPlayer(video.iframeUrl, video.playerName)
+   459→  }
+   460→}
+   461→
+   462→async function executeSelectVoice(cmd: VoiceCommand): Promise<CommandResult> {
+   463→  const st = useAvcStore.getState()
+   464→  if (!st.playback.animeId) return fail('Сначала откройте аниме')
+   465→  const details = await fetchDetails(st.playback.animeId)
+   466→  if (!details) return fail('Не удалось загрузить данные аниме')
+   467→  const dubs = details.dubs
+   468→  if (dubs.length === 0) return fail('Для этого аниме нет доступных озвучек')
+   469→
+   470→  // {next: true} — циклически следующая озвучка
+   471→  if (cmd.params.next === true) {
+   472→    const curIdx = dubs.findIndex((d) => d.name === st.playback.currentDub)
+   473→    const next = dubs[(curIdx + 1) % dubs.length]
+   474→    applyDubChoice(details, next.name)
+   475→    return ok(`Озвучка: ${next.name}`)
+   476→  }
+   477→
+   478→  // {index: N} — N-я озвучка в списке
+   479→  const idx = paramNumber(cmd, 'index')
+   480→  if (idx !== null) {
+   481→    if (idx < 1 || idx > dubs.length) {
+   482→      return fail(`Озвучка №${idx} не найдена. Доступно озвучек: ${dubs.length}`)
+   483→    }
+   484→    const chosen = dubs[idx - 1]
+   485→    applyDubChoice(details, chosen.name)
+   486→    return ok(`Озвучка: ${chosen.name}`)
+   487→  }
+   488→
+   489→  // {name} — резолвинг через Voice Provider Resolver (Task 8-b)
+   490→  const spoken = paramString(cmd, 'name') || paramString(cmd, 'dub')
+   491→  if (!spoken) return fail('Не указана озвучка')
+   492→  const aliasMap = buildUserAliasMap(
+   493→    useAvcStore.getState().voiceAliases.map((r) => ({
+   494→      targetName: r.targetName,
+   495→      alias: r.alias,
+   496→    })),
+   497→  )
+   498→  const match = resolveVoiceProvider(
+   499→    spoken,
+   500→    dubs.map((d) => ({ name: d.name, shortName: d.shortName })),
+   501→    aliasMap,
+   502→    VOICE_CONFIDENCE_ASK,
+   503→  )
+   504→  if (!match) {
+   505→    const available = dubs.map((d) => d.shortName).slice(0, 6).join(', ')
+   506→    return fail(`Озвучка «${spoken}» не найдена. Доступны: ${available}`)
+   507→  }
+   508→  if (match.confidence >= VOICE_CONFIDENCE_AUTO) {
+   509→    // уверенное совпадение — переключаем молча
+   510→    applyDubChoice(details, match.name)
+   511→    return ok(`Озвучка: ${match.name} (${Math.round(match.confidence * 100)}%)`)
+   512→  }
+   513→  // 0.55..0.85 — спрашиваем подтверждение (диалог + голос «да/нет»)
+   514→  useAvcStore.getState().setVoiceConfirm({ spoken, match })
+   515→  return ok(`Вы имеете в виду «${match.name}»? Скажите ДА или НЕТ`)
+   516→}
+   517→
+   518→// --- подтверждение озвучки (голос «да/нет» / диалог) ------------------------------
+   519→
+   520→/** Пользователь подтвердил предложенную озвучку (диалог/голос «да») */
+   521→export function confirmVoiceMatch(): void {
+   522→  const st = useAvcStore.getState()
+   523→  const vc = st.voiceConfirm
+   524→  if (!vc) return
+   525→  st.setVoiceConfirm(null)
+   526→  void (async () => {
+   527→    try {
+   528→      const animeId = useAvcStore.getState().playback.animeId
+   529→      const details = animeId !== null ? await fetchDetails(animeId) : null
+   530→      if (!details) {
+   531→        useAvcStore.getState().setVoiceMessage('Не удалось применить озвучку')
+   532→        toast({ variant: 'destructive', description: 'Не удалось применить озвучку' })
+   533→        return
+   534→      }
+   535→      applyDubChoice(details, vc.match.name)
+   536→      const msg = `Озвучка: ${vc.match.name} (${Math.round(vc.match.confidence * 100)}%)`
+   537→      useAvcStore.getState().setVoiceMessage(msg)
+   538→      toast({ description: msg })
+   539→    } catch {
+   540→      toast({ variant: 'destructive', description: 'Не удалось применить озвучку' })
+   541→    }
+   542→  })()
+   543→}
+   544→
+   545→/** Пользователь отклонил предложенную озвучку (диалог/голос «нет») */
+   546→export function cancelVoiceMatch(): void {
+   547→  const st = useAvcStore.getState()
+   548→  if (!st.voiceConfirm) return
+   549→  st.setVoiceConfirm(null)
+   550→  st.setVoiceMessage('Отменено')
+   551→}
+   552→
+   553→// --- аккаунт: статус просмотра / избранное / продолжить / библиотека / алиасы ------
+   554→
+   555→const WATCH_STATUSES: readonly WatchStatus[] = [
+   556→  'watching',
+   557→  'planned',
+   558→  'completed',
+   559→  'dropped',
+   560→  'on_hold',
+   561→]
+   562→
+   563→async function executeSetWatchStatus(cmd: VoiceCommand): Promise<CommandResult> {
+   564→  const statusRaw = paramString(cmd, 'status')
+   565→  if (!(WATCH_STATUSES as readonly string[]).includes(statusRaw)) {
+   566→    return fail(`Неизвестный статус просмотра: ${statusRaw || '—'}`)
+   567→  }
+   568→  const status = statusRaw as WatchStatus
+   569→  const res = await updateLibraryForCurrentAnime({ status })
+   570→  if (!res.ok) return fail(res.message)
+   571→  const title = useAvcStore.getState().playback.animeTitle ?? res.entry.title
+   572→  return ok(`${title}: ${WATCH_STATUS_LABELS[status]}`)
+   573→}
+   574→
+   575→async function executeToggleFavorite(cmd: VoiceCommand): Promise<CommandResult> {
+   576→  const st = useAvcStore.getState()
+   577→  const existing =
+   578→    st.playback.animeId !== null
+   579→      ? (st.library.find((e) => e.animeId === st.playback.animeId) ?? null)
+   580→      : null
+   581→  // favorite приходит от парсера; без параметра — честный toggle текущего состояния
+   582→  const favorite =
+   583→    cmd.params.favorite === true
+   584→      ? true
+   585→      : cmd.params.favorite === false
+   586→        ? false
+   587→        : !(existing?.favorite ?? false)
+   588→  const res = await updateLibraryForCurrentAnime({ favorite })
+   589→  if (!res.ok) return fail(res.message)
+   590→  const title = useAvcStore.getState().playback.animeTitle ?? res.entry.title
+   591→  return ok(favorite ? `Добавлено в избранное: ${title}` : `Убрано из избранного: ${title}`)
+   592→}
+   593→
+   594→/**
+   595→ * Продолжить просмотр из записи библиотеки: открыть аниме, восстановить
+   596→ * озвучку и серию (и позицию, если сохранена). Экспортируется для UI
+   597→ * (кнопка «Продолжить» в LibraryPanel).
+   598→ */
+   599→export async function continueWatchingFromEntry(entry: LibraryEntryDto): Promise<void> {
+   600→  const card: AnimeCard = {
+   601→    animeId: entry.animeId,
+   602→    slug: entry.slug ?? '',
+   603→    title: entry.title,
+   604→    poster: entry.poster,
+   605→    year: null,
+   606→    rating: null,
+   607→    status: null,
+   608→    type: null,
+   609→  }
+   610→  await navigateToAnime(card, false)
+   611→  const st = useAvcStore.getState()
+   612→  if (entry.currentDub) st.patchPlayback({ currentDub: entry.currentDub })
+   613→  if (entry.episode !== null && entry.episode > 0) {
+   614→    const res = await playEpisode(entry.episode)
+   615→    if (!res.success) {
+   616→      toast({ variant: 'destructive', description: res.message })
+   617→      return
+   618→    }
+   619→    if (entry.positionSec !== null && entry.positionSec > 0) {
+   620→      useAvcStore.getState().patchPlayback({ currentTime: entry.positionSec })
+   621→    }
+   622→  }
+   623→}
+   624→
+   625→async function executeContinueWatching(): Promise<CommandResult> {
+   626→  const st = useAvcStore.getState()
+   627→  if (st.library.length === 0) {
+   628→    return fail('Библиотека пуста — скажи «найди ...» чтобы начать')
+   629→  }
+   630→  // свежая запись среди «смотрю», иначе — любая свежая
+   631→  const watching = st.library.filter((e) => e.status === 'watching')
+   632→  const pool = watching.length > 0 ? watching : st.library
+   633→  const latest = pool.reduce((a, b) => (a.updatedAt >= b.updatedAt ? a : b))
+   634→  try {
+   635→    await continueWatchingFromEntry(latest)
+   636→  } catch (e) {
+   637→    return fail('Не удалось продолжить просмотр', e instanceof Error ? e.message : String(e))
+   638→  }
+   639→  return ok(`Продолжаю: ${latest.title}${latest.episode ? `, серия ${latest.episode}` : ''}`)
+   640→}
+   641→
+   642→async function executeAddVoiceAlias(cmd: VoiceCommand): Promise<CommandResult> {
+   643→  const st = useAvcStore.getState()
+   644→  const alias = paramString(cmd, 'alias')
+   645→  const target = paramString(cmd, 'target')
+   646→  if (!alias || !target) return fail('Укажите алиас и название озвучки')
+   647→
+   648→  const aliasMap = buildUserAliasMap(
+   649→    st.voiceAliases.map((r) => ({ targetName: r.targetName, alias: r.alias })),
+   650→  )
+   651→
+   652→  // 1) резолвим target по озвучкам текущего аниме (если открыто)
+   653→  let match: VoiceProviderMatch | null = null
+   654→  if (st.playback.animeId !== null) {
+   655→    const details = await fetchDetails(st.playback.animeId)
+   656→    if (details && details.dubs.length > 0) {
+   657→      match = resolveVoiceProvider(
+   658→        target,
+   659→        details.dubs.map((d) => ({ name: d.name, shortName: d.shortName })),
+   660→        aliasMap,
+   661→        VOICE_CONFIDENCE_ASK,
+   662→      )
+   663→    }
+   664→  }
+   665→  // 2) fallback — встроенный словарь известных озвучек
+   666→  if (!match) {
+   667→    const defaults: DubCandidate[] = Object.keys(DEFAULT_VOICE_ALIASES).map((k) => ({
+   668→      name: k,
+   669→      shortName: k,
+   670→    }))
+   671→    match = resolveVoiceProvider(target, defaults, aliasMap, VOICE_CONFIDENCE_ASK)
+   672→  }
+   673→  if (!match) return fail(`Не знаю такую озвучку: «${target}»`)
+   674→
+   675→  try {
+   676→    const row = await avcApi.addAlias(match.name, alias, 'voice')
+   677→    if (!row) {
+   678→      useAvcStore.getState().setAuthOpen(true)
+   679→      return fail('Войдите, чтобы сохранять алиасы')
+   680→    }
+   681→    const cur = useAvcStore.getState().voiceAliases
+   682→    useAvcStore
+   683→      .getState()
+   684→      .setVoiceAliases(
+   685→        cur.some((r) => r.id === row.id)
+   686→          ? cur.map((r) => (r.id === row.id ? row : r))
+   687→          : [row, ...cur],
+   688→      )
+   689→    return ok(`Запомнил: «${alias}» → ${match.name}`)
+   690→  } catch (e) {
+   691→    return fail('Не удалось сохранить алиас', e instanceof Error ? e.message : String(e))
+   692→  }
+   693→}
+   694→
+   695→async function executeEpisodeCommand(cmd: VoiceCommand): Promise<CommandResult> {
+   696→  const episode = paramNumber(cmd, 'episode')
+   697→  if (episode === null) return fail('Не указан номер серии')
+   698→  return playEpisode(episode)
+   699→}
+   700→
+   701→async function executeNextPrevEpisode(cmd: VoiceCommand): Promise<CommandResult> {
+   702→  const st = useAvcStore.getState()
+   703→  const pb = st.playback
+   704→  if (!pb.animeId) return fail('Сначала откройте аниме')
+   705→  const details = await fetchDetails(pb.animeId)
+   706→  const max = details ? maxEpisodeOf(details) : pb.episodesAired ?? 0
+   707→  const current = pb.currentEpisode
+   708→  if (cmd.type === VoiceCommandType.NextEpisode) {
+   709→    if (current === null || current === 0) return playEpisode(1)
+   710→    if (max > 0 && current >= max) return fail(`Это последняя серия (${max})`)
+   711→    return playEpisode(current + 1)
+   712→  }
+   713→  if (current === null || current <= 1) return fail('Это первая серия')
+   714→  return playEpisode(current - 1)
+   715→}
+   716→
+   717→function executePlayPause(cmd: VoiceCommand): Promise<CommandResult> {
+   718→  const st = useAvcStore.getState()
+   719→  const pb = st.playback
+   720→  const wantPlay =
+   721→    cmd.type === VoiceCommandType.Play ||
+   722→    (cmd.type === VoiceCommandType.TogglePlayPause && !pb.isPlaying)
+   723→  if (wantPlay) {
+   724→    if (!pb.currentEpisode && pb.animeId) return playEpisode(1)
+   725→    // РЕАЛЬНЫЙ запуск: player_play в iframe. Голосовая сессия уже дала документу
+   726→    // «липкую» активацию (клик по микрофону/Ctrl+Space) + iframe has allow="autoplay"
+   727→    // → play() со звуком легален без единого клика руками.
+   728→    const sent = sendPlayerCommand({ key: 'player_play' })
+   729→    st.patchPlayback({ isPlaying: true })
+   730→    if (sent && !hasStickyActivation()) {
+   731→      // Единственный честный случай «не выходит без рук»: страница загружена,
+   732→      // микрофон разрешён заранее, но ни одного жеста ещё не было.
+   733→      toast({ description: 'Кликните один раз в любом месте — это разблокирует звук и голосовой запуск' })
+   734→    }
+   735→    return Promise.resolve(ok(sent ? 'Воспроизведение' : 'Воспроизведение (плеер не открыт)'))
+   736→  }
+   737→  sendPlayerCommand({ key: 'player_pause' })
+   738→  st.patchPlayback({ isPlaying: false })
+   739→  return Promise.resolve(ok('Пауза'))
+   740→}
+   741→
+   742→function executeSeek(cmd: VoiceCommand): CommandResult {
+   743→  const st = useAvcStore.getState()
+   744→  const pb = st.playback
+   745→  const seconds = paramNumber(cmd, 'seconds') ?? st.settings.seekStep
+   746→  const delta = cmd.type === VoiceCommandType.SeekBackward ? -Math.abs(seconds) : Math.abs(seconds)
+   747→  const max = pb.duration > 0 ? pb.duration : Number.POSITIVE_INFINITY
+   748→  const next = clamp(pb.currentTime + delta, 0, max)
+   749→  st.patchPlayback({ currentTime: next })
+   750→  // РЕАЛЬНАЯ перемотка: player_seek принимает АБСОЛЮТНУЮ секунду (плеер сам
+   751→  // клампит к длительности). currentTime в store — из событий плеера.
+   752→  const sent = sendPlayerCommand({ key: 'player_seek', value: next })
+   753→  // позиция синхронизируется в библиотеку (fire-and-forget, только если запись есть)
+   754→  if (st.user && pb.animeId !== null) {
+   755→    const existing = st.library.find((e) => e.animeId === pb.animeId)
+   756→    if (existing) {
+   757→      void avcApi
+   758→        .putLibrary({ animeId: pb.animeId, title: existing.title, positionSec: Math.round(next) })
+   759→        .then((entry) => {
+   760→          if (entry) upsertLibraryEntry(entry)
+   761→        })
+   762→        .catch(() => undefined)
+   763→    }
+   764→  }
+   765→  if (!sent && playerWindowAvailable()) {
+   766→    return ok(`${delta > 0 ? 'Вперёд' : 'Назад'} на ${Math.abs(seconds)} с (плеер ещё загружается)`)
+   767→  }
+   768→  return ok(`${delta > 0 ? 'Вперёд' : 'Назад'} на ${Math.abs(seconds)} с`)
+   769→}
+   770→
+   771→function executeMuteUnmute(cmd: VoiceCommand): CommandResult {
+   772→  const st = useAvcStore.getState()
+   773→  const pb = st.playback
+   774→  if (cmd.type === VoiceCommandType.Mute) {
+   775→    // запоминаем громкость для восстановления (0 не затирает прежнее значение)
+   776→    st.setPrevVolume(pb.volume > 0 ? pb.volume : st.prevVolume)
+   777→    st.patchPlayback({ volume: 0 })
+   778→    sendPlayerCommand({ key: 'player_set_volume', value: { muted: true, volume: 0 } })
+   779→    return ok('Звук выключен')
+   780→  }
+   781→  const v = st.prevVolume > 0 ? st.prevVolume : 70
+   782→  st.patchPlayback({ volume: v })
+   783→  sendPlayerCommand({ key: 'player_set_volume', value: { muted: false, volume: storeToPlayerVolume(v) } })
+   784→  return ok(`Громкость ${v}%`)
+   785→}
+   786→
+   787→function executeVolume(cmd: VoiceCommand): CommandResult {
+   788→  const st = useAvcStore.getState()
+   789→  const pb = st.playback
+   790→  let volume: number
+   791→  if (cmd.type === VoiceCommandType.SetVolume) {
+   792→    const v = paramNumber(cmd, 'volume')
+   793→    if (v === null) return fail('Не указана громкость')
+   794→    volume = clamp(v, 0, 100)
+   795→  } else {
+   796→    const delta = cmd.type === VoiceCommandType.VolumeUp ? st.settings.volumeStep : -st.settings.volumeStep
+   797→    volume = clamp(pb.volume + delta, 0, 100)
+   798→  }
+   799→  st.patchPlayback({ volume })
+   800→  sendPlayerCommand({ key: 'player_set_volume', value: { volume: storeToPlayerVolume(volume) } })
+   801→  return ok(`Громкость ${volume}%`)
+   802→}
+   803→
+   804→function executeTabCommand(cmd: VoiceCommand): CommandResult {
+   805→  const st = useAvcStore.getState()
+   806→  switch (cmd.type) {
+   807→    case VoiceCommandType.OpenNewTab: {
+   808→      st.addTab({ kind: 'home', title: 'Главная', payload: {} })
+   809→      return ok('Открыта новая вкладка')
+   810→    }
+   811→    case VoiceCommandType.CloseTab: {
+   812→      const target = st.activeTabId ?? st.tabs[st.tabs.length - 1]?.id
+   813→      if (!target) return fail('Нет вкладок')
+   814→      const wasLast = st.tabs.length <= 1
+   815→      st.closeTab(target)
+   816→      return ok(wasLast ? 'Вкладка закрыта. Открыта главная' : 'Вкладка закрыта')
+   817→    }
+   818→    case VoiceCommandType.NextTab:
+   819→    case VoiceCommandType.PreviousTab: {
+   820→      if (st.tabs.length === 0) return fail('Нет вкладок')
+   821→      const idx = st.tabs.findIndex((t) => t.id === st.activeTabId)
+   822→      const cur = idx >= 0 ? idx : 0
+   823→      const dir = cmd.type === VoiceCommandType.NextTab ? 1 : -1
+   824→      const next = st.tabs[(cur + dir + st.tabs.length) % st.tabs.length]
+   825→      st.setActiveTab(next.id)
+   826→      return ok(`Вкладка: ${next.title}`)
+   827→    }
+   828→    case VoiceCommandType.SelectTab: {
+   829→      const n = paramNumber(cmd, 'index')
+   830→      if (n === null) return fail('Не указан номер вкладки')
+   831→      const tab = st.tabs[n - 1]
+   832→      if (!tab) return fail(`Вкладка ${n} не найдена. Открыто вкладок: ${st.tabs.length}`)
+   833→      st.setActiveTab(tab.id)
+   834→      return ok(`Вкладка: ${tab.title}`)
+   835→    }
+   836→    default:
+   837→      return fail('Неизвестная команда вкладок')
+   838→  }
+   839→}
+   840→
+   841→function executeBack(): CommandResult {
+   842→  const st = useAvcStore.getState()
+   843→  const id = st.activeTabId
+   844→  if (!id) return fail('Нет активной вкладки')
+   845→  const entry = st.popBackStack(id)
+   846→  if (!entry) return fail('История вкладки пуста')
+   847→  const snap = entry as {
+   848→    kind?: TabKind
+   849→    title?: string
+   850→    payload?: Record<string, unknown>
+   851→  }
+   852→  st.patchTab(id, {
+   853→    kind: snap.kind ?? 'home',
+   854→    title: snap.title ?? 'Главная',
+   855→    payload: snap.payload ?? {},
+   856→  })
+   857→  return ok('Назад')
+   858→}
+   859→
+   860→function executeScroll(cmd: VoiceCommand): CommandResult {
+   861→  const el = document.getElementById('avc-content')
+   862→  if (!el) return fail('Контейнер контента недоступен')
+   863→  const dir = cmd.type === VoiceCommandType.ScrollDown ? 1 : -1
+   864→  el.scrollBy({ top: dir * 600, behavior: 'smooth' })
+   865→  return ok(dir > 0 ? 'Прокрутка вниз' : 'Прокрутка вверх')
+   866→}
+   867→
+   868→/** Выполнить одну команду. Экспортируется для UI-кнопок (дабы дублировать логику). */
+   869→export async function executeCommand(cmd: VoiceCommand): Promise<CommandResult> {
+   870→  switch (cmd.type) {
+   871→    case VoiceCommandType.OpenHome:
+   872→    case VoiceCommandType.OpenCatalog:
+   873→    case VoiceCommandType.OpenTop100:
+   874→    case VoiceCommandType.OpenOngoing:
+   875→    case VoiceCommandType.OpenAnnouncements:
+   876→    case VoiceCommandType.OpenSchedule: {
+   877→      const reverse: Partial<Record<VoiceCommandType, SiteSectionId>> = {
+   878→        [VoiceCommandType.OpenHome]: 'home',
+   879→        [VoiceCommandType.OpenCatalog]: 'catalog',
+   880→        [VoiceCommandType.OpenTop100]: 'top100',
+   881→        [VoiceCommandType.OpenOngoing]: 'ongoing',
+   882→        [VoiceCommandType.OpenAnnouncements]: 'announcements',
+   883→        [VoiceCommandType.OpenSchedule]: 'schedule',
+   884→      }
+   885→      const section = reverse[cmd.type]
+   886→      return section ? openSectionTab(section) : fail('Неизвестная секция')
+   887→    }
+   888→    case VoiceCommandType.OpenRandom:
+   889→      return executeOpenRandom()
+   890→    case VoiceCommandType.SearchAnime:
+   891→    case VoiceCommandType.OpenAnime:
+   892→      return executeSearchAnime({ ...cmd, params: cmd.type === VoiceCommandType.OpenAnime ? { ...cmd.params, open: true } : cmd.params })
+   893→    case VoiceCommandType.SelectOption:
+   894→      return executeSelectOption(cmd)
+   895→    case VoiceCommandType.SelectEpisode:
+   896→      return executeEpisodeCommand(cmd)
+   897→    case VoiceCommandType.NextEpisode:
+   898→    case VoiceCommandType.PreviousEpisode:
+   899→      return executeNextPrevEpisode(cmd)
+   900→    case VoiceCommandType.Play:
+   901→    case VoiceCommandType.Pause:
+   902→    case VoiceCommandType.TogglePlayPause:
+   903→      return executePlayPause(cmd)
+   904→    case VoiceCommandType.SeekForward:
+   905→    case VoiceCommandType.SeekBackward:
+   906→      return executeSeek(cmd)
+   907→    case VoiceCommandType.VolumeUp:
+   908→    case VoiceCommandType.VolumeDown:
+   909→    case VoiceCommandType.SetVolume:
+   910→      return executeVolume(cmd)
+   911→    case VoiceCommandType.Fullscreen:
+   912→      useAvcStore.getState().setPlayerFullscreen(true)
+   913→      return ok('Полный экран')
+   914→    case VoiceCommandType.ExitFullscreen:
+   915→      useAvcStore.getState().setPlayerFullscreen(false)
+   916→      return ok('Выход из полного экрана')
+   917→    case VoiceCommandType.ToggleFullscreen: {
+   918→      const cur = useAvcStore.getState().playerFullscreen
+   919→      useAvcStore.getState().setPlayerFullscreen(!cur)
+   920→      return ok(cur ? 'Выход из полного экрана' : 'Полный экран')
+   921→    }
+   922→    case VoiceCommandType.OpenNewTab:
+   923→    case VoiceCommandType.CloseTab:
+   924→    case VoiceCommandType.NextTab:
+   925→    case VoiceCommandType.PreviousTab:
+   926→    case VoiceCommandType.SelectTab:
+   927→      return executeTabCommand(cmd)
+   928→    case VoiceCommandType.Reload: {
+   929→      const st = useAvcStore.getState()
+   930→      if (!st.activeTabId) return fail('Нет активной вкладки')
+   931→      st.bumpReload(st.activeTabId)
+   932→      return ok('Обновляю страницу')
+   933→    }
+   934→    case VoiceCommandType.Back:
+   935→      return executeBack()
+   936→    case VoiceCommandType.Forward:
+   937→      return ok('Нет данных для перехода вперёд')
+   938→    case VoiceCommandType.ScrollUp:
+   939→    case VoiceCommandType.ScrollDown:
+   940→      return executeScroll(cmd)
+   941→    case VoiceCommandType.SelectVoice:
+   942→      return executeSelectVoice(cmd)
+   943→    case VoiceCommandType.ShowEpisodes:
+   944→      useAvcStore.getState().setEpisodesPanelOpen(true)
+   945→      return ok('Показываю серии')
+   946→    case VoiceCommandType.ShowHelp:
+   947→      useAvcStore.getState().setHelpOpen(true)
+   948→      return ok('Открываю справку')
+   949→    case VoiceCommandType.Mute:
+   950→    case VoiceCommandType.Unmute:
+   951→      return executeMuteUnmute(cmd)
+   952→    case VoiceCommandType.SetWatchStatus:
+   953→      return executeSetWatchStatus(cmd)
+   954→    case VoiceCommandType.ToggleFavorite:
+   955→      return executeToggleFavorite(cmd)
+   956→    case VoiceCommandType.ContinueWatching:
+   957→      return executeContinueWatching()
+   958→    case VoiceCommandType.ShowLibrary: {
+   959→      useAvcStore.getState().setLibraryOpen(true)
+   960→      return ok('Библиотека открыта')
+   961→    }
+   962→    case VoiceCommandType.AddVoiceAlias:
+   963→      return executeAddVoiceAlias(cmd)
+   964→    case VoiceCommandType.Unknown:
+   965→      return fail('Команда не распознана')
+   966→    default:
+   967→      return fail('Команда не поддерживается')
+   968→  }
+   969→}
+   970→
+   971→// --- интерпретация LLM (fallback) --------------------------------------------------
+   972→
+   973→async function llmInterpret(raw: string, context: BrowserContext): Promise<VoiceCommand[] | null> {
+   974→  try {
+   975→    const res = await fetch('/api/voice/interpret', {
+   976→      method: 'POST',
+   977→      headers: { 'Content-Type': 'application/json' },
+   978→      body: JSON.stringify({ text: raw, context }),
+   979→    })
+   980→    if (!res.ok) return null
+   981→    const data = (await res.json()) as { commands?: VoiceCommand[] | null }
+   982→    return data.commands && data.commands.length > 0 ? data.commands : null
+   983→  } catch {
+   984→    return null
+   985→  }
+   986→}
+   987→
+   988→// --- executeText ------------------------------------------------------------------
+   989→
+   990→export interface ExecuteTextResult {
+   991→  raw: string
+   992→  normalized: string
+   993→  commands: VoiceCommand[]
+   994→  results: CommandResult[]
+   995→}
+   996→
+   997→export function getBrowserContext(): BrowserContext {
+   998→  const s = useAvcStore.getState()
+   999→  return { navigation: s.navigation, playback: s.playback }
+  1000→}
+  1001→
+  1002→export async function executeText(
+  1003→  raw: string,
+  1004→  source: 'voice' | 'text',
+  1005→): Promise<ExecuteTextResult> {
+  1006→  const initial = useAvcStore.getState()
+  1007→  initial.resetPipeline()
+  1008→  step('RAW', raw)
+  1009→
+  1010→  // --- подтверждение озвучки ДО парсинга: «...анилибрию?» → «да» ---------------
+  1011→  const vc = useAvcStore.getState().voiceConfirm
+  1012→  if (vc) {
+  1013→    const t = simpleNormalize(raw)
+  1014→    const isYes = CONFIRM_YES.has(t)
+  1015→    const isNo = CONFIRM_NO.has(t)
+  1016→    if (isYes || isNo) {
+  1017→      const result = isYes
+  1018→        ? ok(`Озвучка: ${vc.match.name} (${Math.round(vc.match.confidence * 100)}%)`)
+  1019→        : ok('Отменено')
+  1020→      step('RESULT', `✓ ${result.message}`)
+  1021→      if (isYes) confirmVoiceMatch()
+  1022→      else cancelVoiceMatch()
+  1023→      const st = useAvcStore.getState()
+  1024→      st.setLastExecuted({ raw, result })
+  1025→      st.setVoiceMessage(result.message)
+  1026→      return { raw, normalized: raw, commands: [], results: [result] }
+  1027→    }
+  1028→    // любой другой текст: снимаем подтверждение и продолжаем обычный парсинг,
+  1029→    // чтобы диалог не «застревал» (исправление можно произнести сразу)
+  1030→    cancelVoiceMatch()
+  1031→    step('RESULT', '✓ Подтверждение отменено — выполняю команду')
+  1032→  }
+  1033→
+  1034→  const context = getBrowserContext()
+  1035→  const parsed = parseCommand(raw, context)
+  1036→  step('NORMALIZED', parsed.normalized || raw)
+  1037→
+  1038→  // --- анти-дубль: та же команда подряд в пределах 2.5 с — пропустить (баг #12) ---
+  1039→  const hash = (parsed.normalized || raw).trim().toLowerCase()
+  1040→  const now = Date.now()
+  1041→  if (lastCommand && lastCommand.hash === hash && now - lastCommand.ts < DEBOUNCE_MS) {
+  1042→    const skip = ok('Дубликат команды пропущен')
+  1043→    step('RESULT', '✓ Дубликат команды пропущен')
+  1044→    const st = useAvcStore.getState()
+  1045→    st.setLastExecuted({ raw, result: skip })
+  1046→    st.setVoiceMessage(skip.message)
+  1047→    return { raw, normalized: parsed.normalized, commands: [], results: [skip] }
+  1048→  }
+  1049→
+  1050→  let commands = parsed.commands
+  1051→  let usedLlm = false
+  1052→
+  1053→  const threshold = initial.settings.confidenceThreshold
+  1054→  const needsLlm = parsed.failed || (commands.length > 0 && parsed.confidence < threshold)
+  1055→  if (needsLlm && initial.settings.llmFallback) {
+  1056→    const llm = await llmInterpret(raw, context)
+  1057→    if (llm) {
+  1058→      commands = llm
+  1059→      usedLlm = true
+  1060→      step('SOURCE', 'LLM fallback')
+  1061→    }
+  1062→  }
+  1063→
+  1064→  const results: CommandResult[] = []
+  1065→
+  1066→  if (commands.length === 0) {
+  1067→    const r = fail('Не удалось распознать команду')
+  1068→    results.push(r)
+  1069→    step('RESULT', `✗ ${r.message}`)
+  1070→  } else {
+  1071→    for (const cmd of commands) {
+  1072→      const label = cmd.label || LABELS[cmd.type] || cmd.type
+  1073→      step('COMMAND', usedLlm ? `${label} (LLM)` : label)
+  1074→      step('PARAMS', JSON.stringify(cmd.params))
+  1075→      step('CONFIDENCE', `${Math.round(cmd.confidence * 100)}%`)
+  1076→      let result: CommandResult
+  1077→      try {
+  1078→        result = await executeCommand(cmd)
+  1079→      } catch (e) {
+  1080→        result = fail('Ошибка выполнения команды', e instanceof Error ? e.message : String(e))
+  1081→      }
+  1082→      results.push(result)
+  1083→      step('RESULT', `${result.success ? '✓' : '✗'} ${result.message}`)
+  1084→
+  1085→      const st = useAvcStore.getState()
+  1086→      if (st.settings.saveHistory) {
+  1087→        void fetch('/api/history', {
+  1088→          method: 'POST',
+  1089→          headers: { 'Content-Type': 'application/json' },
+  1090→          body: JSON.stringify({
+  1091→            raw,
+  1092→            normalized: parsed.normalized,
+  1093→            command: cmd.type,
+  1094→            params: cmd.params,
+  1095→            confidence: cmd.confidence,
+  1096→            success: result.success,
+  1097→            message: result.message,
+  1098→            source: usedLlm ? 'llm' : source,
+  1099→          }),
+  1100→        })
+  1101→          .then(() => useAvcStore.getState().bumpHistoryVersion())
+  1102→          .catch(() => undefined)
+  1103→      }
+  1104→    }
+  1105→  }
+  1106→
+  1107→  // Успешные И проваленные команды обновляют ts: «пауза пауза» подряд — дубль,
+  1108→  // но с интервалом больше DEBOUNCE_MS та же команда выполняется снова
+  1109→  lastCommand = { hash, ts: Date.now() }
+  1110→
+  1111→  const final = results[results.length - 1]
+  1112→  if (!final.success) {
+  1113→    toast({ variant: 'destructive', description: final.message })
+  1114→  }
+  1115→
+  1116→  const st = useAvcStore.getState()
+  1117→  st.setLastExecuted({ raw, result: final })
+  1118→  st.setVoiceMessage(final.message)
+  1119→
+  1120→  return { raw, normalized: parsed.normalized, commands, results }
+  1121→}
+  1122→

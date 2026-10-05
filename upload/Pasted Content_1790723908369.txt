@@ -1,0 +1,3189 @@
+# PRODUCTION FIX & ADVANCED PLAYER CONTROL
+
+## Anime Voice Controller — Player, Autoplay, Fullscreen, Skip Buttons, Voice Control and Self-Diagnostics
+
+You are modifying an existing Windows 10 desktop application built with C#/.NET/WPF + WebView2.
+
+The application is a voice-controlled anime browser/player designed for couch/TV-style usage.
+
+DO NOT rewrite the entire application from scratch.
+
+First inspect the existing architecture and implementation, identify the current player-control, voice-command, WebView2, fullscreen, tab, and site-adapter systems, then improve them while preserving working functionality.
+
+The main goal of this task is:
+
+> Make the application capable of reliably controlling the entire anime website and video player through voice commands with minimal latency, while automatically detecting failures and recovering from them.
+
+The application must not assume that the website will always behave identically.
+
+---
+
+# 1. CURRENT PROBLEMS TO FIX
+
+The following problems currently exist and must be investigated and fixed.
+
+## Problem A — Episode opens but video does not start automatically
+
+When a new episode is opened, the video player sometimes appears in a paused state with a large Play button in the center.
+
+The user currently has to manually click the Play button.
+
+The application must support:
+
+Voice command:
+
+"Play"
+
+"Start"
+
+"Start video"
+
+"Continue"
+
+"Play episode"
+
+"Включи"
+
+"Запусти"
+
+"Продолжить"
+
+"Включи серию"
+
+The application must:
+
+1. Detect the actual video element.
+2. Detect whether it is paused.
+3. Detect whether the video has enough media loaded.
+4. Attempt playback.
+5. Verify that playback actually started.
+6. Report failure if playback did not start.
+7. Retry using an appropriate fallback.
+8. Never report "success" if the video is still paused.
+
+Do NOT simply execute:
+
+video.play();
+
+and assume success.
+
+Use the Promise returned by HTMLMediaElement.play() and verify the resulting state.
+
+Possible states:
+
+* playing
+* paused
+* loading
+* buffering
+* ended
+* blocked
+* unavailable
+* unknown
+
+The application must expose these states internally.
+
+---
+
+# 2. PLAYER STATE DETECTION
+
+Create a dedicated service:
+
+PlayerStateService
+
+It must continuously know the current state of the active player.
+
+Example:
+
+```text
+PlayerState
+{
+    IsVideoPresent
+    IsPlaying
+    IsPaused
+    IsBuffering
+    IsEnded
+    CurrentTime
+    Duration
+    Volume
+    IsMuted
+    IsFullscreen
+    IsAutoplayEnabled
+    CanPlay
+    ReadyState
+    NetworkState
+}
+```
+
+Do not rely only on the visual appearance of the player.
+
+Prefer:
+
+* HTMLVideoElement
+* media events
+* DOM state
+* player metadata
+* WebView2 JavaScript bridge
+
+Use events such as:
+
+* play
+* playing
+* pause
+* waiting
+* canplay
+* canplaythrough
+* timeupdate
+* progress
+* loadedmetadata
+* loadeddata
+* ended
+* error
+* volumechange
+* durationchange
+
+Use event-driven logic wherever possible instead of constant heavy polling.
+
+---
+
+# 3. LOW-LATENCY PLAYBACK CONTROL
+
+The application should minimize command execution latency.
+
+Target architecture:
+
+```text
+Microphone
+    ↓
+VAD
+    ↓
+faster-whisper
+    ↓
+Command Parser
+    ↓
+Command Dispatcher
+    ↓
+Player Controller
+    ↓
+WebView2 JavaScript
+    ↓
+HTML5 Player
+```
+
+Do not reload the page unnecessarily.
+
+Do not recreate WebView2.
+
+Do not perform expensive DOM scans for every command.
+
+Do not wait several seconds before executing simple commands.
+
+For simple commands such as:
+
+* Play
+* Pause
+* Next
+* Previous
+* Volume
+* Mute
+* Fullscreen
+* Skip intro
+
+execution should happen immediately after command recognition.
+
+---
+
+# 4. SMART PLAY COMMAND
+
+Create:
+
+```text
+PlayVideo()
+```
+
+It must work approximately like this:
+
+```text
+1. Find active video/player
+2. Check current state
+3. If already playing:
+       return SUCCESS
+4. If paused:
+       attempt play()
+5. Wait for confirmation
+6. If playing event occurs:
+       SUCCESS
+7. If play() fails:
+       diagnose failure
+8. Try fallback
+9. Verify again
+10. If still failed:
+       report exact failure
+```
+
+Possible failures:
+
+```text
+AUTOPLAY_BLOCKED
+VIDEO_NOT_READY
+VIDEO_NOT_FOUND
+PLAYER_NOT_FOUND
+MEDIA_ERROR
+PLAYER_UI_BLOCKING
+SITE_CHANGED
+UNKNOWN
+```
+
+Do not hide these failures from diagnostics.
+
+---
+
+# 5. AUTOPLAY / AUTO-PLAY EPISODE MODE
+
+Add a dedicated application setting:
+
+```text
+Auto Play
+
+[ ON / OFF ]
+```
+
+Voice commands:
+
+Russian:
+
+"Включи автоплей"
+
+"Включи автоматическое воспроизведение"
+
+"Автоплей включи"
+
+"Автоматически запускай серии"
+
+"Отключи автоплей"
+
+"Выключи автоплей"
+
+English:
+
+"Enable autoplay"
+
+"Disable autoplay"
+
+"Turn autoplay on"
+
+"Turn autoplay off"
+
+The setting must be persistent.
+
+Show current state:
+
+```text
+Autoplay: ON
+```
+
+or:
+
+```text
+Autoplay: OFF
+```
+
+---
+
+# 6. AUTO-NEXT-EPISODE
+
+Create a separate feature:
+
+```text
+Auto Next Episode
+```
+
+This is different from simple video autoplay.
+
+When enabled:
+
+```text
+Episode 5
+    ↓
+video reaches end
+    ↓
+detect ended
+    ↓
+find episode 6
+    ↓
+open/select episode 6
+    ↓
+wait until player is ready
+    ↓
+play episode 6
+```
+
+Voice commands:
+
+"Включи автосерию"
+
+"Включи автоматические серии"
+
+"После серии включай следующую"
+
+"Включи следующие серии автоматически"
+
+"Отключи автосерию"
+
+"Выключи автоматическое переключение"
+
+English equivalents must also be supported.
+
+---
+
+# 7. AUTO-NEXT MUST NOT CREATE LOOPS
+
+Prevent:
+
+```text
+Episode 5
+→ Episode 6
+→ Episode 6
+→ Episode 6
+```
+
+and:
+
+```text
+Episode 5
+→ Episode 6
+→ Episode 7
+→ Episode 7
+```
+
+Track:
+
+```text
+CurrentEpisode
+TargetEpisode
+LastTransitionTimestamp
+TransitionInProgress
+```
+
+Do not allow multiple simultaneous episode transitions.
+
+Use a state machine:
+
+```text
+IDLE
+PLAYING
+ENDING
+TRANSITIONING
+LOADING_NEXT
+STARTING_NEXT
+PLAYING_NEXT
+ERROR
+```
+
+---
+
+# 8. END-OF-EPISODE DETECTION
+
+Do NOT depend only on:
+
+```text
+currentTime == duration
+```
+
+Use the actual:
+
+```text
+ended
+```
+
+event whenever possible.
+
+Also account for:
+
+* buffering near the end
+* duration changes
+* player recreation
+* episode page navigation
+* SPA navigation
+* video replacement
+* advertisements
+* intro/outro overlays
+
+The system must avoid interpreting temporary buffering as the end of the episode.
+
+---
+
+# 9. SKIP INTRO / SKIP OPENING / OTHER PLAYER BUTTONS
+
+The website may display buttons such as:
+
+```text
+Пропустить заставку
+Skip Intro
+Skip Opening
+Skip OP
+Skip Ending
+Пропустить
+Next
+Auto
+Autoplay
+```
+
+The application must discover these controls dynamically.
+
+Do NOT hardcode one exact button selector if avoidable.
+
+Create:
+
+```text
+PlayerActionResolver
+```
+
+It should inspect:
+
+* button text
+* aria-label
+* title
+* data attributes
+* semantic attributes
+* CSS classes
+* known player metadata
+
+Support Russian and English button labels.
+
+Example aliases:
+
+```text
+"Пропустить заставку"
+"Пропустить опенинг"
+"Пропустить открытие"
+"Skip Intro"
+"Skip Opening"
+"Skip OP"
+"Skip"
+
+→ SkipIntro
+```
+
+---
+
+# 10. VOICE COMMANDS FOR PLAYER BUTTONS
+
+Implement:
+
+```text
+"Пропусти заставку"
+"Пропусти опенинг"
+"Скипни опенинг"
+"Пропусти интро"
+"Пропусти"
+"Нажми пропустить"
+```
+
+English:
+
+```text
+"Skip intro"
+"Skip opening"
+"Skip OP"
+"Skip"
+
+```
+
+The command must dynamically determine which matching button currently exists.
+
+If there is no Skip button:
+
+```text
+No skip control currently available.
+```
+
+Do not throw an error.
+
+---
+
+# 11. DYNAMIC PLAYER CONTROL DISCOVERY
+
+Do not assume that every player has the same HTML structure.
+
+Build:
+
+```text
+PlayerControlDiscoveryService
+```
+
+It must discover:
+
+* Play
+* Pause
+* Next
+* Previous
+* Volume
+* Mute
+* Fullscreen
+* Exit fullscreen
+* Settings
+* Quality
+* Speed
+* Skip intro
+* Skip outro
+* Autoplay
+* Episode selector
+* Subtitle controls
+* Audio/voice controls
+
+The service should expose normalized actions:
+
+```text
+Play
+Pause
+TogglePlayPause
+NextEpisode
+PreviousEpisode
+SkipIntro
+SkipOutro
+ToggleMute
+SetVolume
+Fullscreen
+ExitFullscreen
+ToggleFullscreen
+OpenSettings
+SetQuality
+SetPlaybackSpeed
+SetSubtitle
+SelectVoice
+```
+
+The rest of the application must not depend on the website's raw CSS selectors.
+
+---
+
+# 12. MULTI-LAYER CONTROL STRATEGY
+
+Implement a fallback hierarchy.
+
+Priority:
+
+```text
+LEVEL 1
+Direct HTML5 / DOM / JavaScript
+```
+
+then:
+
+```text
+LEVEL 2
+Known site/player JavaScript API
+```
+
+then:
+
+```text
+LEVEL 3
+Keyboard shortcut / player hotkey
+```
+
+then:
+
+```text
+LEVEL 4
+Safe UI interaction
+```
+
+Only use mouse-coordinate interaction as a last-resort fallback.
+
+Never make coordinate-based automation the primary method.
+
+---
+
+# 13. PLAYER MUTATION DETECTION
+
+Many modern video players are dynamically recreated.
+
+For example:
+
+```text
+video element #1
+    ↓
+destroyed
+    ↓
+video element #2
+```
+
+The application must detect this.
+
+Use:
+
+```text
+MutationObserver
+```
+
+where appropriate.
+
+When the player is recreated:
+
+```text
+old player reference
+    ↓
+invalid
+    ↓
+discover new player
+    ↓
+reattach event listeners
+    ↓
+update PlayerState
+```
+
+Do not continuously attach duplicate listeners.
+
+---
+
+# 14. SPA NAVIGATION SUPPORT
+
+The website may change episodes without a full page reload.
+
+Support:
+
+* pushState
+* replaceState
+* history navigation
+* AJAX navigation
+* DOM replacement
+
+When the URL or episode changes:
+
+```text
+detect navigation
+↓
+update current anime
+↓
+update current episode
+↓
+rediscover player
+↓
+rediscover controls
+↓
+restore desired playback state
+```
+
+---
+
+# 15. FULLSCREEN BUG — CRITICAL
+
+There is currently a bug where fullscreen mode causes the application to behave incorrectly and voice commands stop working.
+
+This must be treated as a high-priority architectural issue.
+
+Do NOT simply patch the fullscreen button.
+
+Investigate:
+
+1. Browser fullscreen API.
+2. Video element fullscreen.
+3. WebView2 fullscreen handling.
+4. WPF window fullscreen.
+5. Keyboard focus.
+6. Microphone/voice service.
+7. Main window activation.
+8. WebView2 focus.
+9. Overlay UI.
+10. Voice command event routing.
+
+WebView2 exposes fullscreen-related events specifically for situations where web content requests fullscreen, so the application should handle this explicitly instead of allowing the browser content to enter an uncontrolled state.
+
+---
+
+# 16. FULLSCREEN ARCHITECTURE
+
+Implement a dedicated:
+
+```text
+FullscreenManager
+```
+
+with states:
+
+```text
+Normal
+EnteringFullscreen
+Fullscreen
+ExitingFullscreen
+Recovery
+```
+
+The application must know whether fullscreen was requested by:
+
+```text
+Website
+Video element
+Application
+User keyboard command
+```
+
+Never lose the state.
+
+---
+
+# 17. VOICE MUST CONTINUE WORKING IN FULLSCREEN
+
+This is mandatory.
+
+Test:
+
+```text
+Normal
+↓
+"Fullscreen"
+↓
+Fullscreen
+↓
+"Pause"
+↓
+works
+```
+
+Then:
+
+```text
+Fullscreen
+↓
+"Next episode"
+↓
+works
+```
+
+Then:
+
+```text
+Fullscreen
+↓
+"Skip intro"
+↓
+works
+```
+
+Then:
+
+```text
+Fullscreen
+↓
+"Volume 50"
+↓
+works
+```
+
+Then:
+
+```text
+Fullscreen
+↓
+"Exit fullscreen"
+↓
+works
+```
+
+The microphone and STT engine must NOT depend on the WebView having keyboard focus.
+
+Voice recognition should run independently from WebView focus.
+
+---
+
+# 18. FOCUS MANAGEMENT
+
+Implement explicit focus recovery.
+
+After fullscreen:
+
+```text
+WebView loses focus
+```
+
+must not mean:
+
+```text
+Voice Controller stops working
+```
+
+The voice subsystem must be independent.
+
+When exiting fullscreen:
+
+```text
+restore WebView focus
+restore WPF UI state
+restore keyboard routing
+```
+
+Do not block the WPF UI thread while waiting for WebView2 operations.
+
+All WebView2 asynchronous operations must use proper async/await patterns.
+
+---
+
+# 19. FULLSCREEN TEST MATRIX
+
+Create automated/manual tests for:
+
+### Test 1
+
+Normal → Fullscreen → Voice command
+
+### Test 2
+
+Normal → Fullscreen → Play
+
+### Test 3
+
+Normal → Fullscreen → Pause
+
+### Test 4
+
+Normal → Fullscreen → Next episode
+
+### Test 5
+
+Normal → Fullscreen → Previous episode
+
+### Test 6
+
+Normal → Fullscreen → Skip intro
+
+### Test 7
+
+Normal → Fullscreen → Volume
+
+### Test 8
+
+Normal → Fullscreen → Exit fullscreen
+
+### Test 9
+
+Fullscreen → Next episode → New episode → Fullscreen remains correct
+
+### Test 10
+
+Fullscreen → close/reopen episode → voice still works
+
+### Test 11
+
+Fullscreen → browser navigation → voice still works
+
+### Test 12
+
+Fullscreen → WebView reload → voice still works
+
+### Test 13
+
+Fullscreen → player recreated → controls still work
+
+### Test 14
+
+Fullscreen → microphone temporarily unavailable → recover microphone → voice commands work again
+
+---
+
+# 20. SELF-DIAGNOSTIC SYSTEM
+
+The application must be able to test itself.
+
+Create:
+
+```text
+Diagnostics
+```
+
+with:
+
+```text
+[Run Player Diagnostics]
+```
+
+It should test:
+
+```text
+✓ WebView2
+✓ Active page
+✓ Video element detected
+✓ Player detected
+✓ Play control detected
+✓ Pause control detected
+✓ Next control detected
+✓ Fullscreen control detected
+✓ Skip intro detected
+✓ Voice controls detected
+✓ Episode selector detected
+✓ Media events attached
+✓ MutationObserver active
+✓ Voice recognition active
+✓ Microphone active
+✓ Command parser active
+```
+
+---
+
+# 21. AUTOMATED PLAYER SELF-TEST
+
+Create a test mode:
+
+```text
+Player Diagnostic Mode
+```
+
+It should NOT permanently change the user's viewing state.
+
+It can test:
+
+```text
+Detect player
+Detect video
+Read duration
+Read current time
+Read paused state
+Read volume
+Detect fullscreen capability
+Detect skip buttons
+Detect episode controls
+```
+
+For destructive actions such as actually switching episodes, require explicit user confirmation unless running in a dedicated test environment.
+
+---
+
+# 22. COMMAND VERIFICATION
+
+Every important command must have verification.
+
+Example:
+
+```text
+Command:
+"Pause"
+
+Action:
+video.pause()
+
+Verification:
+video.paused === true
+```
+
+If:
+
+```text
+false
+```
+
+then the command failed.
+
+For:
+
+```text
+Play
+```
+
+verify:
+
+```text
+paused === false
+```
+
+and preferably confirm:
+
+```text
+currentTime is advancing
+```
+
+For:
+
+```text
+Mute
+```
+
+verify:
+
+```text
+video.muted === true
+```
+
+For:
+
+```text
+Volume 50
+```
+
+verify:
+
+```text
+video.volume ≈ 0.5
+```
+
+For:
+
+```text
+Fullscreen
+```
+
+verify the actual fullscreen state.
+
+Never report success based only on the command being dispatched.
+
+---
+
+# 23. RETRY POLICY
+
+Implement intelligent retries.
+
+Example:
+
+```text
+Attempt 1
+Direct player API
+
+↓ failure
+
+Attempt 2
+DOM control
+
+↓ failure
+
+Attempt 3
+Player keyboard shortcut
+
+↓ failure
+
+Attempt 4
+Rediscover player
+
+↓ failure
+
+Report error
+```
+
+Do NOT blindly retry indefinitely.
+
+Prevent:
+
+```text
+Play
+→ Play
+→ Play
+→ Play
+→ Play
+```
+
+Use bounded retries and state checks.
+
+---
+
+# 24. COMMAND DEDUPLICATION
+
+Prevent one voice command from executing twice.
+
+Example:
+
+```text
+"Next episode"
+```
+
+must not become:
+
+```text
+Episode 5
+→ Episode 6
+→ Episode 7
+```
+
+because STT produced duplicate results.
+
+Implement:
+
+```text
+CommandDebouncer
+CommandId
+Timestamp
+ExecutionState
+```
+
+---
+
+# 25. LOW-LATENCY REQUIREMENTS
+
+Optimize for minimum practical latency.
+
+Do NOT:
+
+* reload the page
+* scan the entire DOM repeatedly
+* start a new browser process
+* initialize Whisper for every command
+* recreate the microphone
+* recreate WebView2
+* wait for arbitrary long delays
+* use screenshots to understand the player during normal operation
+
+Keep these persistent:
+
+```text
+WebView2
+STT process/model
+Microphone stream
+VAD
+Command parser
+Site adapter
+Player controller
+```
+
+Use event-driven communication.
+
+Cache discovered player references and selectors, but invalidate the cache when the DOM/player changes.
+
+---
+
+# 26. VOICE COMMAND PRIORITY
+
+Commands should have priorities.
+
+### Highest priority
+
+```text
+Stop
+Pause
+Play
+Exit fullscreen
+```
+
+### Medium
+
+```text
+Next episode
+Previous episode
+Skip intro
+Volume
+Mute
+```
+
+### Navigation
+
+```text
+Search
+Open catalog
+Open TOP-100
+Open anime
+Switch tab
+```
+
+This prevents ambiguous long-running actions from blocking simple playback commands.
+
+---
+
+# 27. NATURAL LANGUAGE VARIATIONS
+
+Support multiple Russian variations.
+
+For Play:
+
+```text
+включи
+запусти
+начни
+продолжи
+воспроизведи
+включи видео
+запусти серию
+```
+
+For Pause:
+
+```text
+пауза
+останови
+поставь на паузу
+приостанови
+```
+
+For Next:
+
+```text
+следующая
+следующая серия
+дальше
+включи следующую
+переключи дальше
+```
+
+For Skip:
+
+```text
+пропусти
+пропусти заставку
+пропусти опенинг
+скипни опенинг
+пропусти интро
+```
+
+For Fullscreen:
+
+```text
+полный экран
+на весь экран
+включи полный экран
+выйди из полного экрана
+```
+
+---
+
+# 28. PLAYER COMMAND CONTEXT
+
+The parser must understand:
+
+```text
+"включи"
+
+```
+
+as:
+
+```text
+Play
+```
+
+if the current player is paused.
+
+But:
+
+```text
+"включи шестую"
+
+```
+
+must become:
+
+```text
+SelectEpisode(6)
+```
+
+And:
+
+```text
+"включи шестую и полный экран"
+
+```
+
+must become:
+
+```text
+SelectEpisode(6)
+→ wait for episode
+→ Play
+→ Fullscreen
+```
+
+Support sequential command execution.
+
+---
+
+# 29. AUTO-NEXT + AUTOPLAY COMBINATION
+
+These features must work together.
+
+Example:
+
+```text
+Auto Next = ON
+Autoplay = ON
+```
+
+Episode 5 ends.
+
+Application:
+
+```text
+ended
+↓
+select episode 6
+↓
+wait for new video
+↓
+detect video
+↓
+attempt play
+↓
+verify playing
+↓
+continue
+```
+
+If autoplay fails:
+
+```text
+detect failure
+↓
+retry
+↓
+fallback
+↓
+if still failed:
+show notification
+```
+
+Voice control must remain available.
+
+---
+
+# 30. REMEMBER USER PREFERENCES
+
+Persist:
+
+```text
+Autoplay
+Auto-next
+Preferred voice
+Preferred subtitle
+Preferred quality
+Playback speed
+Volume
+Mute state
+Fullscreen preference
+Last episode
+Last playback position
+Couch Mode
+Microphone
+Wake word
+STT model
+```
+
+Do not store sensitive microphone recordings unless explicitly required.
+
+Prefer processing voice locally.
+
+---
+
+# 31. USER FEEDBACK
+
+The application should provide lightweight feedback.
+
+When the user says:
+
+> "Следующая серия"
+
+show briefly:
+
+```text
+▶ Next episode
+```
+
+When:
+
+> "Пропусти заставку"
+
+show:
+
+```text
+⏩ Skip intro
+```
+
+When:
+
+> "Включи автосерию"
+
+show:
+
+```text
+🔄 Auto-next: ON
+```
+
+When a command fails:
+
+```text
+⚠ Unable to start video
+```
+
+Do not interrupt playback with large dialogs.
+
+---
+
+# 32. DEBUG LOG
+
+Create structured logs.
+
+Example:
+
+```text
+[12:34:01.231]
+VOICE:
+"включи видео"
+
+[12:34:01.242]
+COMMAND:
+PlayVideo
+
+[12:34:01.245]
+PLAYER:
+video detected
+
+[12:34:01.247]
+STATE:
+paused=true
+
+[12:34:01.251]
+ACTION:
+video.play()
+
+[12:34:01.310]
+EVENT:
+playing
+
+[12:34:01.312]
+VERIFICATION:
+SUCCESS
+```
+
+For failures:
+
+```text
+ACTION:
+video.play()
+
+ERROR:
+NotAllowedError
+
+FALLBACK:
+player button
+
+RESULT:
+SUCCESS
+```
+
+This is extremely important for future maintenance.
+
+---
+
+# 33. SITE CHANGE DETECTION
+
+If the website changes its player:
+
+```text
+Expected control not found
+```
+
+the application should log:
+
+```text
+SITE_ADAPTER_WARNING
+
+Player structure changed.
+
+Missing:
+SkipIntro
+```
+
+It should not crash.
+
+---
+
+# 34. DO NOT USE HARD-CODED SCREEN COORDINATES AS PRIMARY CONTROL
+
+Do NOT create logic like:
+
+```text
+click X=500 Y=300
+```
+
+because:
+
+* window size changes
+* fullscreen changes coordinates
+* DPI changes
+* scaling changes
+* player layout changes
+* TV resolution changes
+
+Coordinate automation may exist only as an emergency fallback and must be disabled by default.
+
+---
+
+# 35. PLAYER ACTION API
+
+Create a clean abstraction:
+
+```csharp
+interface IPlayerController
+{
+    Task<CommandResult> PlayAsync();
+    Task<CommandResult> PauseAsync();
+    Task<CommandResult> TogglePlayPauseAsync();
+
+    Task<CommandResult> NextEpisodeAsync();
+    Task<CommandResult> PreviousEpisodeAsync();
+
+    Task<CommandResult> SkipIntroAsync();
+    Task<CommandResult> SkipOutroAsync();
+
+    Task<CommandResult> SetVolumeAsync(double volume);
+    Task<CommandResult> ToggleMuteAsync();
+
+    Task<CommandResult> EnterFullscreenAsync();
+    Task<CommandResult> ExitFullscreenAsync();
+    Task<CommandResult> ToggleFullscreenAsync();
+
+    Task<PlayerState> GetStateAsync();
+}
+```
+
+All site-specific implementation should be hidden behind this interface.
+
+---
+
+# 36. COMMAND RESULT
+
+Every command should return:
+
+```csharp
+CommandResult
+{
+    Success
+    Action
+    ErrorCode
+    Message
+    ExecutionTimeMs
+    RetryCount
+}
+```
+
+Example:
+
+```text
+Success: true
+Action: Play
+ExecutionTimeMs: 84
+RetryCount: 0
+```
+
+This allows performance monitoring.
+
+---
+
+# 37. PERFORMANCE MONITORING
+
+Add optional diagnostics:
+
+```text
+STT latency: 420 ms
+Command parsing: 4 ms
+Player action: 35 ms
+Verification: 42 ms
+Total: 501 ms
+```
+
+This makes it possible to identify where latency comes from.
+
+Do not optimize blindly.
+
+Measure first.
+
+---
+
+# 38. FINAL ACCEPTANCE TESTS
+
+The implementation is NOT complete until these scenarios work.
+
+### Test A — Open episode
+
+```text
+Open episode
+→ video appears
+→ automatically detect player
+→ voice "Включи"
+→ video starts
+→ application confirms playback
+```
+
+### Test B — Skip intro
+
+```text
+Episode starts
+→ Skip Intro appears
+→ "Пропусти заставку"
+→ button is activated
+→ application verifies action
+```
+
+### Test C — Auto-next
+
+```text
+Enable auto-next
+→ episode reaches ended
+→ next episode selected
+→ player detected
+→ playback starts
+```
+
+### Test D — Fullscreen
+
+```text
+"Полный экран"
+→ fullscreen
+→ "Пауза"
+→ works
+
+"Продолжить"
+→ works
+
+"Следующая серия"
+→ works
+
+"Пропусти заставку"
+→ works
+
+"Выйди из полного экрана"
+→ works
+```
+
+### Test E — Player recreation
+
+```text
+Episode changes
+→ old video destroyed
+→ new video created
+→ new player detected
+→ event listeners reattached
+→ voice control continues working
+```
+
+### Test F — WebView reload
+
+```text
+Reload page
+→ WebView recovers
+→ player rediscovered
+→ voice system remains active
+```
+
+### Test G — Site control
+
+Test:
+
+```text
+Play
+Pause
+Next
+Previous
+Skip Intro
+Mute
+Volume
+Fullscreen
+Exit Fullscreen
+Autoplay
+Auto-next
+Episode selection
+Voice selection
+```
+
+### Test H — Long session
+
+Run:
+
+```text
+10+ episode transitions
+```
+
+without restarting the application.
+
+Check for:
+
+* memory leaks
+* duplicate event handlers
+* duplicate commands
+* frozen WebView
+* broken voice recognition
+* broken fullscreen
+* increasing command latency
+
+---
+
+# 39. IMPORTANT IMPLEMENTATION RULE
+
+Do not "fix" a symptom by adding arbitrary delays such as:
+
+```csharp
+await Task.Delay(3000);
+```
+
+unless there is a documented reason.
+
+Prefer:
+
+```text
+event
+↓
+state change
+↓
+action
+↓
+verification
+```
+
+instead of:
+
+```text
+action
+↓
+wait 3 seconds
+↓
+hope it worked
+```
+
+Use timeouts only as safety limits.
+
+---
+
+# 40. FINAL GOAL
+
+The user should be able to sit on the couch and control the website almost entirely by voice:
+
+```text
+"Открой Берсерк"
+
+"Включи пятую серию"
+
+"Полный экран"
+
+"Громкость 40"
+
+"Пропусти заставку"
+
+"Пауза"
+
+"Продолжить"
+
+"Перемотай на пять минут"
+
+"Включи автосерию"
+
+"Следующая"
+
+"Предыдущая"
+
+"Переключи озвучку на Анилибрию"
+
+"Отключи автосерию"
+
+"Выйди из полного экрана"
+```
+
+Every command must:
+
+1. Be recognized.
+2. Be parsed.
+3. Be executed.
+4. Be verified.
+5. Recover automatically when possible.
+6. Be logged when it fails.
+
+The application must remain responsive and voice-controlled in normal mode, fullscreen mode, after episode changes, after player recreation, and after WebView navigation.
+
+PRIORITY ORDER:
+
+1. Fix fullscreen stability.
+2. Fix reliable Play/Resume.
+3. Implement player state detection.
+4. Implement Skip Intro / Skip Outro discovery.
+5. Implement Auto-play.
+6. Implement Auto-next episode.
+7. Implement voice control for all player controls.
+8. Implement command verification.
+9. Implement recovery/fallback logic.
+10. Implement automated diagnostics and test suite.
+11. Optimize latency.
+12. Only then add additional cosmetic features.
+
+Do not declare the implementation complete until the acceptance tests above have been executed and their results are visible in the diagnostic system.
+
+# AUTHENTICATION & ACCOUNT SYSTEM
+
+## YummyAnime Account Login, Persistent Session, Secure Credentials and Voice-Controlled Account Management
+
+You are modifying the existing Windows 10 desktop application built with:
+
+* C#
+* .NET 8
+* WPF
+* WebView2
+* MVVM
+* YummyAnime site adapter
+* Voice Command system
+* faster-whisper STT
+* existing player controller
+* existing fullscreen/player/episode controls
+
+DO NOT rewrite the existing application.
+
+Inspect the current architecture first and integrate this authentication system into the existing application.
+
+The target website is:
+
+https://old.yummyani.me/
+
+The website supports user accounts.
+
+The user wants to be able to log into their existing YummyAnime account directly through this desktop application using the same login/email/username and password they use on the normal website.
+
+The application must behave as a normal browser session for the website.
+
+---
+
+# 1. PRIMARY GOAL
+
+The user must be able to:
+
+1. Open the application.
+2. Open YummyAnime.
+3. Log into their existing YummyAnime account.
+4. Stay logged in between application launches.
+5. Use account-dependent website functionality normally.
+6. Log out when desired.
+7. Optionally save the login securely.
+8. Never expose or log the password.
+9. Never require the user to manually log in every time.
+10. Continue using voice control after authentication.
+11. Keep authentication working in fullscreen mode.
+12. Keep authentication state when navigating between anime pages.
+
+The application must use the website's normal login mechanism.
+
+Do NOT attempt to bypass authentication.
+
+Do NOT bypass CAPTCHA.
+
+Do NOT bypass 2FA.
+
+Do NOT extract session tokens.
+
+Do NOT scrape authentication cookies for external use.
+
+Do NOT send the user's password to any external service other than the actual YummyAnime login page required for authentication.
+
+---
+
+# 2. LOGIN UI
+
+Add a dedicated account button to the application UI.
+
+Example:
+
+```text
+┌───────────────────────────────┐
+│ 👤 Account                    │
+│                               │
+│ Not signed in                 │
+│                               │
+│ [ Sign in ]                   │
+└───────────────────────────────┘
+```
+
+After login:
+
+```text
+┌───────────────────────────────┐
+│ 👤 Account                    │
+│                               │
+│ Signed in                     │
+│ Username: example             │
+│                               │
+│ [ Account ]                   │
+│ [ Sign out ]                  │
+└───────────────────────────────┘
+```
+
+Do not display the password.
+
+---
+
+# 3. LOGIN METHOD
+
+Preferred behavior:
+
+The application opens the actual YummyAnime login page inside WebView2.
+
+The user can enter:
+
+```text
+Username / Email
+Password
+```
+
+and submit the normal website login form.
+
+The application should not recreate or replace the website's authentication backend.
+
+It should allow the actual site to authenticate the user.
+
+This is important because the website may change:
+
+* login URL
+* form structure
+* CSRF mechanism
+* authentication endpoint
+* CAPTCHA
+* JavaScript
+* security checks
+
+The application should therefore avoid hardcoding an independent authentication API unless the website explicitly provides a documented API.
+
+---
+
+# 4. OPTIONAL APP-LEVEL LOGIN FORM
+
+If the existing YummyAnime login form is stable and technically compatible with automation, the application may provide:
+
+```text
+Username / Email:
+[________________]
+
+Password:
+[________________]
+
+☐ Remember username
+
+☐ Remember password securely
+
+[ Sign In ]
+```
+
+However:
+
+IMPORTANT:
+
+The application must submit credentials only to the legitimate YummyAnime login endpoint.
+
+Do not send credentials to:
+
+* analytics services
+* logging systems
+* OpenAI
+* Whisper
+* ZAI
+* third-party APIs
+* application developers
+* remote telemetry
+* crash reports
+
+The password must never appear in logs.
+
+---
+
+# 5. SECURE PASSWORD STORAGE
+
+If "Remember password" is implemented, NEVER store:
+
+```text
+password.txt
+config.json
+settings.json
+database.db
+plain text SQLite
+plain text JSON
+```
+
+Use a Windows-protected credential mechanism such as:
+
+* Windows Credential Manager
+* Windows DPAPI / ProtectedData
+* another OS-backed secure credential store
+
+The encryption/decryption key must not be hardcoded into the application.
+
+The password must never be written to application logs.
+
+The password must never appear in:
+
+* debug console
+* diagnostic window
+* exception messages
+* crash reports
+* analytics
+* telemetry
+* screenshots
+* clipboard automatically
+
+---
+
+# 6. PREFERRED AUTHENTICATION ARCHITECTURE
+
+Use two separate concepts:
+
+```text
+Credentials
+    ↓
+Secure Windows storage
+```
+
+and:
+
+```text
+Authenticated WebView2 Profile
+    ↓
+Cookies
+    ↓
+Session
+    ↓
+YummyAnime
+```
+
+After successful login, the normal WebView2 profile should preserve the website's authenticated state.
+
+WebView2 stores cookies and other profile data in an app-specific User Data Folder, allowing authentication state to persist between application launches. Use a dedicated application profile for the YummyAnime browser session.
+
+Do not manually export authentication cookies to a custom file.
+
+Do not copy browser cookies from Microsoft Edge or Chrome.
+
+Do not attempt to inject an existing browser session.
+
+---
+
+# 7. DEDICATED WEBVIEW2 USER DATA FOLDER
+
+Create a dedicated profile for the application.
+
+Example concept:
+
+```text
+%LOCALAPPDATA%
+    └── AnimeController
+          └── WebView2
+                └── YummyAnimeProfile
+```
+
+The exact path should be configurable internally but should remain inside the user's local application data directory.
+
+Do not use a network share.
+
+Do not store the WebView2 User Data Folder inside the installation directory if that directory requires administrator permissions.
+
+The profile must persist between application launches.
+
+---
+
+# 8. AUTHENTICATION STATE DETECTION
+
+Create:
+
+```text
+AuthenticationService
+```
+
+and:
+
+```text
+YummyAnimeAuthenticationAdapter
+```
+
+The service must determine whether the user is:
+
+```text
+Unknown
+Checking
+LoggedOut
+LoggingIn
+LoggedIn
+LoginFailed
+SessionExpired
+```
+
+Do not determine login state from a single fragile CSS selector if avoidable.
+
+Use multiple signals:
+
+* current URL
+* presence of login/logout controls
+* account/profile element
+* authenticated navigation result
+* known page structure
+* website-specific DOM indicators
+
+Do not read the user's password to determine whether login succeeded.
+
+---
+
+# 9. AUTHENTICATION CHECK
+
+When the application starts:
+
+```text
+Application start
+        ↓
+Initialize WebView2
+        ↓
+Load YummyAnime
+        ↓
+Check authentication state
+        ↓
+Logged in?
+   ┌────┴────┐
+  YES        NO
+   ↓          ↓
+Continue     Show login option
+```
+
+If already logged in:
+
+```text
+Welcome back
+```
+
+Do not ask for the password again.
+
+---
+
+# 10. SESSION PERSISTENCE
+
+After successful login:
+
+```text
+Close application
+        ↓
+Start application again
+        ↓
+Initialize WebView2
+        ↓
+Restore same profile
+        ↓
+Open YummyAnime
+        ↓
+Check authentication
+        ↓
+User remains logged in
+```
+
+This should work without manually re-entering credentials whenever the website's session remains valid.
+
+Do not artificially log the user out when the application closes.
+
+---
+
+# 11. SESSION EXPIRATION
+
+If the website session expires:
+
+```text
+SessionExpired
+```
+
+show:
+
+```text
+Your YummyAnime session has expired.
+
+[ Sign In Again ]
+```
+
+Do not repeatedly retry the password automatically.
+
+Do not enter the password indefinitely.
+
+Do not create an authentication loop.
+
+---
+
+# 12. LOGIN FAILURE HANDLING
+
+Handle:
+
+```text
+Wrong username
+Wrong password
+CAPTCHA
+Network error
+Server error
+Timeout
+Session expired
+Website unavailable
+Unknown login failure
+```
+
+Example:
+
+```text
+Login failed.
+
+The website did not accept the credentials.
+
+[ Try Again ]
+```
+
+Never display:
+
+```text
+Password = ********
+```
+
+inside logs or diagnostics.
+
+Never display the entered password back to the user.
+
+---
+
+# 13. CAPTCHA
+
+If YummyAnime displays CAPTCHA:
+
+DO NOT attempt to bypass it.
+
+Instead:
+
+```text
+CAPTCHA detected.
+
+Please complete the verification in the browser.
+```
+
+The WebView2 page remains open so the user can complete the normal verification manually.
+
+After CAPTCHA completion:
+
+```text
+AuthenticationService
+        ↓
+re-check login state
+```
+
+If authenticated:
+
+```text
+LOGIN SUCCESS
+```
+
+---
+
+# 14. TWO-FACTOR AUTHENTICATION
+
+If the website introduces 2FA or another verification step:
+
+Do not attempt to bypass it.
+
+Allow the user to complete the normal website flow inside WebView2.
+
+After completion:
+
+```text
+Authentication state
+        ↓
+LoggedIn
+```
+
+The application should not ask the user to provide a 2FA secret to the application unless the website itself requires it through its official flow.
+
+---
+
+# 15. LOGOUT
+
+Implement:
+
+```text
+Sign Out
+```
+
+Voice commands:
+
+Russian:
+
+```text
+"Выйди из аккаунта"
+"Выйти из аккаунта"
+"Выйди"
+"Разлогинься"
+```
+
+English:
+
+```text
+"Log out"
+"Sign out"
+"Logout"
+```
+
+Before logout, optionally ask for confirmation:
+
+```text
+Do you want to sign out?
+
+[ Yes ] [ Cancel ]
+```
+
+For voice:
+
+> "Да"
+
+or:
+
+> "Отмена"
+
+---
+
+# 16. IMPORTANT: LOGOUT MUST BE WEBSITE-AWARE
+
+Prefer using the actual YummyAnime logout functionality rather than simply deleting all WebView2 cookies.
+
+For example:
+
+```text
+Voice:
+"Выйди из аккаунта"
+
+        ↓
+
+YummyAnimeAdapter
+        ↓
+
+Locate website logout action
+        ↓
+
+Execute logout
+        ↓
+
+Verify logged-out state
+```
+
+Only clear the application's authentication profile data if necessary and explicitly requested.
+
+Do not accidentally delete:
+
+* browsing history
+* user preferences
+* all tabs
+* cached site data
+
+unless the user requests a full data reset.
+
+---
+
+# 17. ACCOUNT STATUS IN MAIN UI
+
+Show a small status indicator:
+
+```text
+● Signed in
+```
+
+or:
+
+```text
+○ Not signed in
+```
+
+Do not display sensitive information.
+
+If the website provides a username:
+
+```text
+● HellShaftSama
+```
+
+may be displayed.
+
+Never display:
+
+* password
+* session token
+* cookie value
+* authentication token
+* raw credentials
+
+---
+
+# 18. VOICE ACCOUNT COMMANDS
+
+Implement:
+
+```text
+"Открой мой аккаунт"
+"Открой профиль"
+"Проверь авторизацию"
+"Я вошёл?"
+"Я авторизован?"
+"Выйди из аккаунта"
+"Войти в аккаунт"
+```
+
+Possible responses:
+
+```text
+"Вы вошли в аккаунт."
+```
+
+or:
+
+```text
+"Вы не вошли в аккаунт."
+```
+
+If not authenticated:
+
+> "Открываю страницу входа."
+
+---
+
+# 19. ACCOUNT-AWARE SITE FEATURES
+
+Once authenticated, the application must allow the normal YummyAnime website account features to work inside WebView2.
+
+Do not attempt to recreate every account feature natively.
+
+Prefer allowing the authenticated website to provide:
+
+* profile
+* favorites
+* watch history
+* user settings
+* comments
+* ratings
+* other account-dependent features
+
+The application can provide shortcuts to these pages where appropriate.
+
+---
+
+# 20. VOICE SHORTCUTS FOR ACCOUNT PAGES
+
+If supported by the site:
+
+```text
+"Открой мой профиль"
+"Открой избранное"
+"Открой историю"
+"Открой мои настройки"
+```
+
+These should use the authenticated WebView2 session.
+
+---
+
+# 21. MULTIPLE ACCOUNTS — FUTURE SUPPORT
+
+Design the authentication layer so multiple accounts can be supported later.
+
+Example:
+
+```text
+Accounts
+
+● Account 1
+  Username: UserA
+
+○ Account 2
+  Username: UserB
+
+[ Add Account ]
+[ Remove Account ]
+```
+
+Each account should have an isolated WebView2 profile/user data folder.
+
+Do not mix cookies between accounts.
+
+WebView2 supports separate profiles with separated cookies and user preference data.
+
+This feature does not have to be exposed in version 1.0, but the architecture must not prevent it.
+
+---
+
+# 22. ACCOUNT PROFILE MANAGER
+
+Create:
+
+```text
+AccountManager
+```
+
+with:
+
+```text
+AccountId
+DisplayName
+ProfilePath
+LoginState
+LastUsed
+```
+
+Never store:
+
+```text
+Password
+SessionCookie
+AccessToken
+RefreshToken
+```
+
+inside the normal account metadata.
+
+Credentials must be handled separately through secure storage.
+
+---
+
+# 23. PASSWORD FIELD SECURITY
+
+If the application provides its own login form:
+
+The password field must:
+
+* mask characters
+* disable accidental plaintext display
+* never log changes
+* never copy password to clipboard
+* clear password from memory as soon as practical after use
+* not appear in crash reports
+
+Do not implement "show password" by default.
+
+If implemented, require explicit user action.
+
+---
+
+# 24. AUTOFILL
+
+If the user chooses:
+
+```text
+☑ Remember username
+```
+
+username can be stored in normal application settings.
+
+For:
+
+```text
+☑ Remember password
+```
+
+use secure OS-backed storage.
+
+Do not put the password in:
+
+```text
+appsettings.json
+settings.json
+user.config
+SQLite
+registry plaintext
+```
+
+---
+
+# 25. BROWSER SESSION VS SAVED PASSWORD
+
+These must be treated as two different features.
+
+### Remember login session
+
+Uses:
+
+```text
+WebView2 profile
++
+cookies
++
+local storage
+```
+
+### Remember password
+
+Uses:
+
+```text
+Windows secure credential storage
+```
+
+The user may choose:
+
+```text
+Stay signed in:
+ON
+
+Remember password:
+OFF
+```
+
+This is a valid configuration.
+
+---
+
+# 26. CLEAR ACCOUNT DATA
+
+Add:
+
+```text
+Settings
+→ Account
+→ Security
+```
+
+Options:
+
+```text
+[ Sign Out ]
+
+[ Forget Saved Password ]
+
+[ Clear YummyAnime Session ]
+
+[ Clear Account Data ]
+```
+
+Before destructive actions, show confirmation.
+
+Example:
+
+```text
+This will remove the saved YummyAnime session from this application.
+
+Continue?
+
+[ Yes ] [ Cancel ]
+```
+
+Do not delete the entire WebView2 profile unless specifically requested.
+
+---
+
+# 27. IMPORTANCE OF WEBVIEW2 USER DATA FOLDER
+
+The WebView2 User Data Folder contains browser state such as:
+
+* cookies
+* cache
+* permissions
+* local storage
+* other browser data
+
+The application must correctly manage this folder and ensure it is writable. If the UDF cannot be written, sign-in state may fail to persist between launches.
+
+Add diagnostics for this.
+
+---
+
+# 28. AUTHENTICATION DIAGNOSTICS
+
+Add:
+
+```text
+Settings
+→ Diagnostics
+→ Account
+```
+
+Show:
+
+```text
+YummyAnime URL          ✓
+WebView2 Profile        ✓
+Profile Writable        ✓
+Authentication Check    ✓
+Login Page              ✓
+Session Persistence     ✓
+```
+
+Never show:
+
+```text
+Password
+Cookie
+Token
+Authorization Header
+```
+
+even in advanced diagnostics.
+
+---
+
+# 29. LOGIN TEST
+
+Create a safe diagnostic test:
+
+```text
+[ Test Authentication ]
+```
+
+It should check:
+
+```text
+WebView2 initialized
+↓
+YummyAnime loaded
+↓
+Login state detectable
+↓
+Profile writable
+↓
+Session data persistent
+```
+
+It should NOT automatically submit the user's password during diagnostics.
+
+---
+
+# 30. RESTART TEST
+
+Mandatory test:
+
+```text
+1. Start application.
+2. Log into YummyAnime.
+3. Confirm authenticated.
+4. Close application.
+5. Start application again.
+6. Open YummyAnime.
+7. Confirm authenticated without entering password.
+```
+
+Record:
+
+```text
+Authentication persistence:
+PASS / FAIL
+```
+
+---
+
+# 31. FULLSCREEN + ACCOUNT TEST
+
+Because the application already has fullscreen issues, test authentication together with fullscreen.
+
+Test:
+
+```text
+Login
+↓
+Open anime
+↓
+Start episode
+↓
+Fullscreen
+↓
+Voice command
+↓
+Open profile
+↓
+Return to player
+↓
+Voice command
+↓
+Exit fullscreen
+```
+
+Voice recognition must remain functional.
+
+---
+
+# 32. PLAYER + ACCOUNT TEST
+
+Test:
+
+```text
+Logged in
+↓
+Open anime
+↓
+Episode 1
+↓
+Next episode
+↓
+Skip intro
+↓
+Auto-next
+↓
+Episode 2
+↓
+Open profile
+↓
+Return to episode
+```
+
+The authenticated session must survive all navigation.
+
+---
+
+# 33. TAB + ACCOUNT TEST
+
+Test:
+
+```text
+Tab 1:
+Anime player
+
+Tab 2:
+Profile
+
+Tab 3:
+Favorites
+
+Tab 4:
+TOP-100
+```
+
+Switch between them.
+
+Verify:
+
+* authentication remains active
+* cookies are shared within the intended profile
+* no unexpected logout
+* player continues correctly
+* voice commands still work
+
+---
+
+# 34. WEBVIEW2 CRASH RECOVERY
+
+If WebView2 crashes/restarts:
+
+```text
+WebView2 crash
+↓
+Restart WebView2
+↓
+Restore same User Data Folder
+↓
+Restore tabs
+↓
+Restore YummyAnime
+↓
+Check authentication
+```
+
+Do not require the user to enter the password again if the website session is still valid.
+
+---
+
+# 35. DO NOT COPY MICROSOFT EDGE COOKIES
+
+The application must NOT attempt to:
+
+* read Chrome cookies
+* read Edge cookies
+* decrypt browser cookies
+* copy browser sessions
+* inject browser cookies
+* extract browser tokens
+
+The user must authenticate through the application/WebView2 normally.
+
+---
+
+# 36. SECURITY BOUNDARY
+
+The application should treat YummyAnime as external web content.
+
+Do not allow arbitrary website JavaScript to call native sensitive application APIs.
+
+Expose only the minimum required WebView2 message bridge.
+
+For example:
+
+```text
+Allowed:
+PlayerControl
+AccountStatus
+SiteNavigation
+VoiceCommandResult
+
+Not allowed:
+ReadPassword
+ReadWindowsCredentials
+ExecuteShellCommand
+ReadArbitraryFiles
+ReadApplicationSecrets
+```
+
+Use strict origin checking for WebView2 ↔ WPF communication.
+
+---
+
+# 37. AUTHENTICATION EVENT FLOW
+
+Implement approximately:
+
+```text
+Application Start
+       ↓
+Initialize WebView2
+       ↓
+Load dedicated YummyAnime profile
+       ↓
+Navigate to YummyAnime
+       ↓
+AuthenticationService.CheckState()
+       ↓
+ ┌───────────────┐
+ │               │
+Logged In     Logged Out
+ │               │
+ ↓               ↓
+Continue       Login UI
+ │               │
+ ↓               ↓
+Player         User Login
+ │               │
+                 ↓
+          Verify Authentication
+                 │
+                 ↓
+              Logged In
+```
+
+---
+
+# 38. IMPORTANT FAILURE CASE
+
+If login appears successful visually but authentication check says logged out:
+
+Do not assume success.
+
+Run:
+
+```text
+AuthenticationVerification
+```
+
+and determine:
+
+```text
+LOGIN_SUCCESS
+LOGIN_FAILED
+LOGIN_PENDING
+UNKNOWN
+```
+
+Show the appropriate status.
+
+---
+
+# 39. PERFORMANCE
+
+Login and authentication must not slow down normal player control.
+
+Do not continuously poll authentication.
+
+Authentication should be checked:
+
+* at application startup
+* after login
+* after logout
+* after navigation to account pages
+* after session-expired detection
+* after WebView2 recovery
+
+Do not check authentication every frame.
+
+---
+
+# 40. NO PASSWORD IN VOICE COMMANDS
+
+Do NOT support:
+
+> "Войди с логином X и паролем Y"
+
+The voice system must never transmit or store passwords.
+
+Voice commands may safely do:
+
+```text
+"Открой страницу входа"
+"Проверь авторизацию"
+"Выйди из аккаунта"
+"Открой мой профиль"
+```
+
+For entering the password, use the secure login form.
+
+This prevents the microphone/STT pipeline from becoming a password-capture mechanism.
+
+---
+
+# 41. FINAL ACCEPTANCE TESTS
+
+The feature is complete only when all of these pass:
+
+### Test 1 — Normal login
+
+```text
+Open application
+→ Open YummyAnime
+→ Login
+→ Authentication detected
+```
+
+### Test 2 — Persistent login
+
+```text
+Login
+→ Close application
+→ Reopen
+→ Still logged in
+```
+
+### Test 3 — Logout
+
+```text
+Logged in
+→ "Выйди из аккаунта"
+→ Logout
+→ Authentication state = LoggedOut
+```
+
+### Test 4 — Session expiration
+
+```text
+Session expires
+→ Application detects it
+→ User can login again
+```
+
+### Test 5 — CAPTCHA
+
+```text
+CAPTCHA appears
+→ Application does not attempt bypass
+→ User completes it manually
+→ Authentication detected
+```
+
+### Test 6 — Fullscreen
+
+```text
+Logged in
+→ Fullscreen
+→ Voice commands
+→ Account remains active
+```
+
+### Test 7 — Player
+
+```text
+Logged in
+→ Play
+→ Pause
+→ Next episode
+→ Skip intro
+→ Auto-next
+→ Authentication remains active
+```
+
+### Test 8 — Tabs
+
+```text
+Player
+→ Profile
+→ Favorites
+→ TOP-100
+→ Back to Player
+→ Still logged in
+```
+
+### Test 9 — WebView2 restart
+
+```text
+Logged in
+→ WebView2 restart
+→ Restore profile
+→ Authentication remains if website session remains valid
+```
+
+### Test 10 — Security
+
+Verify that the password never appears in:
+
+* logs
+* diagnostics
+* crash reports
+* normal settings files
+* telemetry
+* debug console
+
+---
+
+# 42. FINAL USER EXPERIENCE
+
+The final application should provide:
+
+```text
+┌───────────────────────────────────────┐
+│           ANIME CONTROLLER            │
+├───────────────────────────────────────┤
+│                                       │
+│ 👤 Account: ● Signed in               │
+│                                       │
+│ 🎬 Berserk                            │
+│ Episode 5 / 25                        │
+│                                       │
+│ ▶ Playing                             │
+│ 🔄 Auto-next: ON                      │
+│                                       │
+│ 🎤 Ready for voice command            │
+│                                       │
+└───────────────────────────────────────┘
+```
+
+The user should be able to say:
+
+```text
+"Проверь, я вошёл?"
+
+"Открой мой профиль"
+
+"Открой избранное"
+
+"Вернись к аниме"
+
+"Следующая серия"
+
+"Пропусти заставку"
+
+"Включи автосерию"
+
+"Выйди из аккаунта"
+```
+
+All of these must operate using the same authenticated YummyAnime session inside the application's WebView2 profile.
+
+---
+
+# FINAL IMPLEMENTATION PRINCIPLE
+
+The application is a browser/controller for the user's own YummyAnime account, not a separate authentication system.
+
+Therefore:
+
+Website authentication
+↓
+WebView2
+↓
+Persistent authenticated profile
+↓
+YummyAnime website
+
+NOT:
+
+Application
+↓
+Custom login API
+↓
+Extract token
+↓
+Inject token into website
+
+Use the legitimate website login flow and persistent WebView2 profile.
+
+Prioritize:
+
+1. Reliable login.
+2. Persistent session.
+3. Secure credential handling.
+4. Logout.
+5. Session expiration detection.
+6. CAPTCHA/2FA compatibility.
+7. Authentication recovery after WebView2 restart.
+8. Compatibility with fullscreen.
+9. Compatibility with player controls.
+10. Compatibility with voice commands.
+11. Diagnostics.
+12. Future multi-account support.
+

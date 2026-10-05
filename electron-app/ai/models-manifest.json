@@ -1,0 +1,139 @@
+{
+  "$schema": "./ai-manifest-schema.md",
+  "version": 4,
+  "generatedAt": "2026-10-04",
+  "generatedBy": "scripts/validate-ai-assets.mjs (значения сняты с реальных загрузок/HEAD-проверок, не выдуманы)",
+  "releaseNote": "v4: GigaAM v3 — модель ПО УМОЛЧАНИЮ (точность: «Наруто 20 серия» вместо «уратуту нараратутто» на T-One 8 кГц). sha256 обоих GigaAM сняты с реальных архивов и проверены при сборке. Полные expectedFiles (encoder/decoder/joiner). T-One — необязательный запасной для слабых ПК.",
+  "storage": {
+    "dirName": "ai-models",
+    "layout": {
+      "stt": "stt/<modelId>/",
+      "vad": "vad/silero-vad/"
+    }
+  },
+  "components": {
+    "vad": {
+      "id": "silero-vad",
+      "name": "Silero VAD",
+      "required": true,
+      "runtime": "sherpa-onnx Vad",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/silero_vad.onnx",
+      "expectedFiles": [
+        "silero_vad.onnx"
+      ],
+      "sizeBytes": 643854,
+      "sha256": "9e2449e1087496d8d4caba907f23e0bd3f78d91fa552479bb9c23ac09cbb1fd6",
+      "verifiedAt": "2026-10-03",
+      "verifiedChecks": {
+        "httpStatus": 200,
+        "contentLengthMatch": true
+      }
+    }
+  },
+  "models": [
+    {
+      "key": "stt",
+      "id": "t-one-russian",
+      "name": "T-One Russian Streaming (ru-fast)",
+      "profile": "ru-fast",
+      "engine": "t-one-streaming",
+      "lang": "ru",
+      "version": "2025-09-08",
+      "required": false,
+      "runtime": "sherpa-onnx OnlineRecognizer (нативный, Windows x64 + Linux x64)",
+      "description": "Стриминговое русское распознавание (CTC, 8 кГц) + живые partial-результаты. Минимальная задержка — рекомендуется для слабых ПК.",
+      "dir": "stt/t-one-russian",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-streaming-t-one-russian-2025-09-08.tar.bz2",
+      "mirrors": [],
+      "archive": "tar.bz2",
+      "expectedFiles": [
+        "model.onnx",
+        "tokens.txt"
+      ],
+      "sizeBytes": 128468156,
+      "sha256": "b9c907450e99a6e5049e279bf18368a17db0bdc5e63b7fa978943138debbe3ae",
+      "acceptRanges": true,
+      "contentType": "application/octet-stream",
+      "license": "MIT (модель T-One, Т-Банк; код sherpa-onnx — Apache-2.0)",
+      "minRamBytes": 4294967296,
+      "recommendedFor": "Слабые ПК (2–4 ядра, 4–8 ГБ RAM): минимальная задержка, живые partial",
+      "verifiedAt": "2026-10-03",
+      "verifiedChecks": {
+        "httpStatus": 200,
+        "redirects": 1,
+        "contentLengthMatch": true,
+        "acceptRanges": true
+      }
+    },
+    {
+      "key": "stt",
+      "id": "gigaam-v3-russian",
+      "name": "GigaAM v3 Russian RNNT int8 (ru-accurate) — по умолчанию",
+      "profile": "ru-accurate",
+      "engine": "gigaam-offline",
+      "lang": "ru",
+      "version": "2025-12-16",
+      "required": false,
+      "default": true,
+      "runtime": "sherpa-onnx OfflineRecognizer transducer (нативный, Windows x64 + Linux x64)",
+      "description": "Лучшая точность для русского (Sber GigaAM v3, RNNT, int8, 16 кГц) — распознаёт «Наруто двадцать серия», названия и числа. Модель ПО УМОЛЧАНИЮ. Декодирование фразы целиком после VAD — без живых partial-результатов.",
+      "dir": "stt/gigaam-v3-russian",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-transducer-giga-am-v3-russian-2025-12-16.tar.bz2",
+      "mirrors": [],
+      "archive": "tar.bz2",
+      "expectedFiles": [
+        "tokens.txt",
+        "encoder.int8.onnx",
+        "decoder.onnx",
+        "joiner.onnx"
+      ],
+      "sizeBytes": 167388020,
+      "sha256": "20a439491904b839f35eb8efaa3d99cbfaaad0c6dcba22d06ff218bb0056772d",
+      "acceptRanges": true,
+      "license": "MIT (GigaAM v3, Сбер; подтверждено репозиторием salute-developers/GigaAM)",
+      "minRamBytes": 6442450944,
+      "recommendedFor": "ПК с 6+ ГБ RAM, когда нужна максимальная точность распознавания",
+      "verifiedAt": "2026-10-04",
+      "verifiedChecks": {
+        "httpStatus": 200,
+        "redirects": 1,
+        "contentLengthMatch": true,
+        "acceptRanges": true,
+        "sha256VerifiedByDownload": true
+      }
+    },
+    {
+      "key": "stt",
+      "id": "gigaam-v2-russian",
+      "name": "GigaAM v2 Russian CTC int8",
+      "profile": "ru-accurate",
+      "engine": "gigaam-offline",
+      "lang": "ru",
+      "version": "2025-04-19",
+      "required": false,
+      "runtime": "sherpa-onnx OfflineRecognizer nemoCtc (нативный, Windows x64 + Linux x64)",
+      "description": "Точная офлайн-модель (GigaAM v2 CTC, int8, 16 кГц). Запасной вариант ru-accurate с другой архитектурой декодера.",
+      "dir": "stt/gigaam-v2-russian",
+      "url": "https://github.com/k2-fsa/sherpa-onnx/releases/download/asr-models/sherpa-onnx-nemo-ctc-giga-am-v2-russian-2025-04-19.tar.bz2",
+      "mirrors": [],
+      "archive": "tar.bz2",
+      "expectedFiles": [
+        "tokens.txt",
+        "model.int8.onnx"
+      ],
+      "sizeBytes": 166917722,
+      "sha256": "777be8717d8aaf04861823671290f7687f7579fd9ac63a2124955573f920caf5",
+      "acceptRanges": true,
+      "license": "MIT (GigaAM v2, Сбер; подтверждено репозиторием salute-developers/GigaAM)",
+      "minRamBytes": 6442450944,
+      "recommendedFor": "Альтернатива GigaAM v3 (та же ниша точности)",
+      "verifiedAt": "2026-10-04",
+      "verifiedChecks": {
+        "httpStatus": 200,
+        "redirects": 1,
+        "contentLengthMatch": true,
+        "acceptRanges": true
+      }
+    }
+  ]
+}

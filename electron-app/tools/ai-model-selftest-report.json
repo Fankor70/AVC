@@ -1,0 +1,42 @@
+{
+  "ranAt": "2026-10-03T18:59:58.668Z",
+  "baseDir": "/home/z/my-project/electron-app/models",
+  "steps": [
+    {
+      "name": "status-initial",
+      "status": "PASS",
+      "detail": "components=stt:installed, vad:installed, tts:installed, llm:installed, freeDisk=?"
+    },
+    {
+      "name": "install-stt",
+      "status": "PASS",
+      "detail": "уже установлен"
+    },
+    {
+      "name": "file:model.onnx",
+      "status": "PASS",
+      "detail": "137.5 MB"
+    },
+    {
+      "name": "file:tokens.txt",
+      "status": "PASS",
+      "detail": "0 KB"
+    },
+    {
+      "name": "resume-install",
+      "status": "PASS",
+      "detail": "part был 0 KB → установка завершилась, isInstalled=true"
+    },
+    {
+      "name": "status-final",
+      "status": "PASS",
+      "detail": "stt:installed, vad:installed, tts:installed, llm:installed"
+    },
+    {
+      "name": "detect-corrupted-marker",
+      "status": "PASS",
+      "detail": "неверный id в маркере → компонент считается неустановленным (требует переустановки)"
+    }
+  ],
+  "exitCode": 0
+}

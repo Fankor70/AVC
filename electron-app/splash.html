@@ -1,0 +1,193 @@
+<!--
+  AVC-Anime — окно запуска (splash) и окно фатальной ошибки запуска.
+  Один файл на два режима:
+    splash.html            — splash при старте (этапы запуска, кнопка логов)
+    splash.html?mode=fatal — окно ошибки запуска (сообщение + хвост лога + действия)
+  Без внешних ресурсов — работает из asar офлайн.
+-->
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Content-Security-Policy"
+        content="default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src data:;" />
+  <title>AVC-Anime</title>
+  <style>
+    :root {
+      --bg1: #0b2c4d;
+      --bg2: #081a30;
+      --bg3: #050d18;
+      --cyan: #38bdf8;
+      --cyan-soft: rgba(56, 189, 248, 0.35);
+      --text: #e6f0ff;
+      --muted: #93a7c4;
+      --error: #f87171;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+    html, body { height: 100%; }
+    body {
+      font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+      background:
+        radial-gradient(120% 90% at 20% 0%, rgba(56, 189, 248, 0.14), transparent 60%),
+        radial-gradient(100% 80% at 80% 100%, rgba(14, 116, 144, 0.18), transparent 55%),
+        linear-gradient(160deg, var(--bg1), var(--bg2) 55%, var(--bg3));
+      color: var(--text);
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+    }
+
+    /* ---- splash-режим ---- */
+    #splash {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 14px;
+      padding: 22px 26px;
+    }
+    .logo {
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.06em;
+      text-shadow: 0 0 18px rgba(56, 189, 248, 0.55);
+    }
+    .logo span { color: var(--cyan); }
+    .ring {
+      width: 34px;
+      height: 34px;
+      border-radius: 50%;
+      border: 3px solid rgba(56, 189, 248, 0.18);
+      border-top-color: var(--cyan);
+      animation: spin 0.9s linear infinite;
+    }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .stage {
+      font-size: 12.5px;
+      color: var(--muted);
+      text-align: center;
+      min-height: 17px;
+      max-width: 100%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .hint {
+      font-size: 10.5px;
+      color: rgba(147, 167, 196, 0.65);
+      text-align: center;
+      max-width: 340px;
+      line-height: 1.35;
+    }
+    .footerbar { padding: 0 12px 10px; display: flex; justify-content: flex-start; }
+
+    /* ---- fatal-режим ---- */
+    #fatal {
+      flex: 1;
+      display: none;
+      flex-direction: column;
+      gap: 10px;
+      padding: 16px 18px 14px;
+      min-height: 0;
+    }
+    #fatal h1 {
+      font-size: 16px;
+      font-weight: 700;
+      color: var(--error);
+    }
+    #fatal .sub { font-size: 12px; color: var(--muted); line-height: 1.45; }
+    .box {
+      font-size: 11.5px;
+      line-height: 1.45;
+      background: rgba(4, 12, 22, 0.72);
+      border: 1px solid rgba(56, 189, 248, 0.16);
+      border-radius: 8px;
+      padding: 10px 12px;
+      overflow: auto;
+      user-select: text;
+      white-space: pre-wrap;
+      word-break: break-word;
+      min-height: 0;
+    }
+    #errMessage { color: #ffd2d2; max-height: 30%; flex: 0 1 auto; }
+    #errLog { color: #b7c8e0; font-family: Consolas, "Cascadia Mono", monospace; flex: 1 1 auto; }
+    .actions { display: flex; gap: 8px; flex-wrap: wrap; }
+
+    /* ---- кнопки ---- */
+    button {
+      font-family: inherit;
+      font-size: 11.5px;
+      color: var(--text);
+      background: rgba(16, 34, 58, 0.85);
+      border: 1px solid rgba(56, 189, 248, 0.28);
+      border-radius: 7px;
+      padding: 6px 12px;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease;
+    }
+    button:hover { background: rgba(24, 48, 80, 0.95); border-color: var(--cyan-soft); }
+    button.primary { background: rgba(14, 116, 144, 0.55); }
+    button.primary:hover { background: rgba(21, 148, 182, 0.6); }
+    @media (prefers-reduced-motion: reduce) {
+      .ring { animation: none; border-top-color: var(--cyan-soft); }
+    }
+  </style>
+</head>
+<body>
+  <div id="splash">
+    <div class="logo">AVC<span>-Anime</span></div>
+    <div class="ring" aria-hidden="true"></div>
+    <div class="stage" id="stage">Запуск…</div>
+    <div class="hint">Первый запуск распаковывает приложение — это может занять до пары минут.<br />Если что-то пойдёт не так, здесь появится окно с причиной и логом.</div>
+    <div class="footerbar">
+      <button id="openLogsBtn" title="Откроет папку %APPDATA%\AVC-Anime\logs">Открыть папку с логами</button>
+    </div>
+  </div>
+
+  <div id="fatal">
+    <h1>Не удалось завершить запуск</h1>
+    <div class="sub" id="fatalSub">Ошибка зафиксирована в журнале. Скриншот этого окна поможет разобрать проблему.</div>
+    <div class="box" id="errMessage"></div>
+    <div class="box" id="errLog"></div>
+    <div class="actions">
+      <button class="primary" id="relaunchBtn">Перезапустить</button>
+      <button id="openLogsBtn2">Открыть папку с логами</button>
+      <button id="quitBtn">Выйти</button>
+    </div>
+  </div>
+
+  <script>
+    const stageEl = document.getElementById('stage')
+    const params = new URLSearchParams(location.search)
+
+    window.__stage = (text) => { stageEl.textContent = String(text || '') }
+
+    window.__fatal = (payload) => {
+      try {
+        document.getElementById('splash').style.display = 'none'
+        const f = document.getElementById('fatal')
+        f.style.display = 'flex'
+        document.getElementById('errMessage').textContent = payload.message || '(сообщение недоступно)'
+        document.getElementById('errLog').textContent = payload.logTail || '(лог недоступен)'
+        document.title = 'AVC-Anime — ошибка запуска'
+      } catch (e) { /* окно остаётся splash'ем — не критично */ }
+    }
+
+    const api = window.avcSplash || {}
+    const bind = (id, fn) => {
+      const el = document.getElementById(id)
+      if (el) el.addEventListener('click', fn)
+    }
+    bind('openLogsBtn', () => api.openLogs && api.openLogs())
+    bind('openLogsBtn2', () => api.openLogs && api.openLogs())
+    bind('relaunchBtn', () => api.relaunch && api.relaunch())
+    bind('quitBtn', () => api.quit && api.quit())
+
+    if (params.get('mode') === 'fatal') {
+      document.getElementById('splash').style.display = 'none'
+      document.getElementById('fatal').style.display = 'flex'
+    }
+  </script>
+</body>
+</html>

@@ -1,0 +1,2010 @@
+You are working on my existing Windows desktop application **AVC-Anime (Anime Voice Control)**.
+
+I want to add a complete **Offline Episodes / Local Video Cache system**.
+
+The feature must integrate with the existing AVC-Anime architecture instead of creating a separate application.
+
+The application already contains:
+
+* WebView2
+* YummyAnime site adapter
+* PlayerStateService
+* voice control
+* local STT
+* AdBlock
+* account/session persistence
+* anime/episode navigation
+* autoplay
+* auto-next
+* watch history
+* bookmarks
+* quality selection
+* fullscreen
+* MVVM architecture
+* local application data/configuration
+
+The new system must allow the user to save episodes locally and watch them later without an Internet connection, **only when the content/source is legitimately available for download or caching**.
+
+Do NOT bypass DRM, encryption, authentication restrictions, signed URL protections, paywalls, access controls, or other technical restrictions.
+
+Do NOT implement stream extraction or DRM circumvention.
+
+If the current website does not provide a legitimate downloadable/offline source, the system must clearly report that offline saving is unavailable for that episode instead of attempting to circumvent the restriction.
+
+---
+
+# 1. MAIN FEATURE
+
+Add an **Offline / Downloads** system.
+
+The user should be able to:
+
+1. Download one episode.
+2. Select multiple episodes.
+3. Download an entire anime.
+4. Cancel downloads.
+5. Pause/resume downloads if technically supported.
+6. Delete downloaded episodes.
+7. Delete an entire anime from local storage.
+8. See download progress.
+9. See download state.
+10. Watch downloaded episodes without Internet.
+11. Automatically use the local episode when available.
+12. Continue watch progress for offline episodes.
+13. Return to online playback when the local copy does not exist.
+
+---
+
+# 2. USER EXPERIENCE
+
+When opening an anime page, each episode should have a download control.
+
+Example:
+
+```text
+Episode 1     ▶    ↓
+Episode 2     ▶    ↓
+Episode 3     ▶    ✓ Downloaded
+Episode 4     ▶    ↓
+Episode 5     ▶    ↓
+```
+
+Possible states:
+
+```text
+Not downloaded
+Checking...
+Queued
+Downloading
+Paused
+Downloaded
+Failed
+Unavailable
+```
+
+Do not overload the UI with unnecessary controls.
+
+---
+
+# 3. DOWNLOAD ONE EPISODE
+
+When the user chooses:
+
+```text
+Download Episode 6
+```
+
+the application should:
+
+1. Resolve the episode using the existing YummyAnime adapter.
+2. Determine whether a legitimate downloadable/offline source exists.
+3. Determine the selected video quality.
+4. Create a download task.
+5. Download to the AVC-Anime offline storage.
+6. Validate the downloaded file.
+7. Atomically finalize it.
+8. Add it to the local database/index.
+9. Display it as `Downloaded`.
+
+Do not mark a file as downloaded until validation succeeds.
+
+---
+
+# 4. MULTI-EPISODE DOWNLOAD
+
+The user must be able to select episodes.
+
+Example:
+
+```text
+☑ Episode 1
+☑ Episode 2
+☑ Episode 3
+☐ Episode 4
+☐ Episode 5
+```
+
+Then:
+
+```text
+Download selected
+```
+
+The user should also have:
+
+```text
+Select all
+Deselect all
+Download all
+```
+
+Do not start dozens of simultaneous downloads.
+
+Implement a controlled download queue.
+
+Recommended default:
+
+```text
+Maximum concurrent downloads = 2
+```
+
+Make this configurable later.
+
+---
+
+# 5. DOWNLOAD ALL EPISODES
+
+Add:
+
+```text
+Download all episodes
+```
+
+Before starting:
+
+* determine which episodes are already downloaded
+* skip existing valid files
+* queue only missing episodes
+* show total progress
+
+Example:
+
+```text
+Attack on Titan
+
+Episodes:
+25 / 25
+
+Downloaded:
+10
+
+Remaining:
+15
+
+Queue:
+15
+
+Overall:
+████████░░░░░░░ 40%
+```
+
+If an episode is unavailable for legitimate offline saving, mark:
+
+```text
+Unavailable
+```
+
+and continue with the rest.
+
+One failed episode must NOT cancel the entire queue.
+
+---
+
+# 6. STORAGE LOCATION
+
+I specifically want the offline cache to be located near the application.
+
+Preferred structure:
+
+```text
+AVC-Anime/
+│
+├── AVC-Anime.exe
+│
+├── Offline/
+│   │
+│   ├── Anime Name 1/
+│   │   ├── Season 01/
+│   │   │   ├── Episode 001 - Episode Name.mp4
+│   │   │   ├── Episode 002 - Episode Name.mp4
+│   │   │   └── ...
+│   │
+│   ├── Anime Name 2/
+│   │   ├── Season 01/
+│   │   │   ├── Episode 001 - Episode Name.mp4
+│   │   │   └── ...
+│   │
+│   └── ...
+│
+├── Data/
+│
+└── ...
+```
+
+However, do not blindly assume the executable directory is writable.
+
+Implement a configurable storage root.
+
+Default:
+
+```text
+<ApplicationDirectory>/Offline/
+```
+
+If the application is installed in a protected directory such as:
+
+```text
+C:\Program Files\
+```
+
+the application must detect that writing there is not permitted.
+
+In that situation:
+
+* show a clear message
+* offer another writable location
+* allow the user to change the offline storage directory
+
+Do not require Administrator privileges just to download an episode.
+
+---
+
+# 7. USER-FRIENDLY FILE ORGANIZATION
+
+Folder names must be readable.
+
+Example:
+
+```text
+Offline/
+└── Frieren - Beyond Journey's End/
+    └── Season 01/
+        ├── Episode 001 - I'm Used to Magic.mp4
+        ├── Episode 002 - It Would Be a Problem.mp4
+        └── Episode 003 - Killing Magic.mp4
+```
+
+Sanitize Windows-invalid characters.
+
+Invalid characters:
+
+```text
+< > : " / \ | ? *
+```
+
+Also handle:
+
+* very long anime names
+* duplicate names
+* Unicode
+* Russian names
+* Japanese names
+* English names
+
+Do not silently create ambiguous folders.
+
+Use a stable internal ID in the metadata database even if the visible folder name changes.
+
+---
+
+# 8. STORAGE METADATA
+
+Do NOT rely exclusively on filenames.
+
+Create an offline database/index.
+
+Example:
+
+```text
+OfflineEpisode
+
+Id
+Site
+AnimeId
+AnimeTitle
+SeasonNumber
+EpisodeNumber
+EpisodeTitle
+VideoPath
+SubtitlePath
+AudioLanguage
+SubtitleLanguage
+Quality
+Width
+Height
+Duration
+FileSize
+DownloadedAt
+LastPlayedAt
+WatchProgress
+IsCompleted
+Checksum
+Status
+SourceVersion
+```
+
+Use the existing database technology if AVC-Anime already has one.
+
+Do not introduce a second database without a strong reason.
+
+---
+
+# 9. OFFLINE LIBRARY
+
+Add an application section:
+
+```text
+Offline
+```
+
+Example:
+
+```text
+Offline Library
+
+Frieren
+    12 / 28 episodes
+    1080p
+
+Solo Leveling
+    24 / 24 episodes
+    1080p
+
+One Piece
+    5 / 1100 episodes
+```
+
+Clicking an anime should display locally available episodes.
+
+Example:
+
+```text
+Frieren
+
+Episode 1     ✓
+Episode 2     ✓
+Episode 3     ✓
+Episode 4     -
+Episode 5     ✓
+```
+
+`✓` means available offline.
+
+---
+
+# 10. OFFLINE MODE
+
+The application must detect whether Internet access is available.
+
+If there is no Internet:
+
+```text
+Offline Mode
+```
+
+The application should still allow:
+
+* opening AVC-Anime
+* opening Offline Library
+* browsing downloaded anime
+* browsing downloaded episodes
+* playing local video
+* pause
+* resume
+* seek
+* volume
+* mute/unmute
+* fullscreen
+* subtitles if locally stored
+* playback progress
+* next downloaded episode
+* previous downloaded episode
+
+Do not require the YummyAnime website to load for local playback.
+
+---
+
+# 11. OFFLINE PLAYER
+
+Create or extend the existing player architecture.
+
+Conceptually:
+
+```text
+IPlaybackSource
+
+OnlineEpisodeSource
+LocalEpisodeSource
+```
+
+Then:
+
+```text
+PlayerController
+       |
+       +---- Online source
+       |
+       +---- Local source
+```
+
+The existing voice/player system should not care whether the video comes from:
+
+```text
+https://...
+```
+
+or:
+
+```text
+Offline/Frieren/Season 01/Episode 001.mp4
+```
+
+The player should receive an abstract playback source.
+
+---
+
+# 12. AUTOMATIC LOCAL-FIRST PLAYBACK
+
+When the user opens an episode:
+
+```text
+Is local episode available?
+        |
+   +----+----+
+   |         |
+  YES        NO
+   |         |
+   v         v
+Play local  Online playback
+```
+
+If the user is offline:
+
+```text
+Local exists?
+   |
+ YES → Play
+   |
+ NO → Show:
+      "This episode is not available offline."
+```
+
+Do not attempt to access the online site if there is no Internet and the local file exists.
+
+---
+
+# 13. USER CONTROL
+
+Add a setting:
+
+```text
+Playback source:
+
+○ Always online
+○ Prefer local
+○ Local only when offline
+```
+
+Default:
+
+```text
+Prefer local
+```
+
+This allows the user to choose behavior.
+
+---
+
+# 14. DOWNLOAD QUALITY
+
+The download system should integrate with the existing quality selector.
+
+Example:
+
+```text
+Download quality:
+
+Auto
+360p
+480p
+720p
+1080p
+1440p
+2160p / 4K
+```
+
+Only display qualities actually available.
+
+If `Auto` is selected:
+
+use a sensible available quality according to the existing application rules.
+
+Do not claim 4K exists if the site/source does not provide it.
+
+---
+
+# 15. QUALITY SELECTION PER DOWNLOAD
+
+The user should be able to choose:
+
+```text
+Download Episode 6
+Quality:
+[1080p ▼]
+```
+
+For bulk downloads:
+
+```text
+Download selected
+
+Quality:
+[1080p ▼]
+
+☐ Use highest available
+☐ Use current player quality
+```
+
+Do not download multiple quality versions unless explicitly requested.
+
+---
+
+# 16. DOWNLOAD QUEUE
+
+Implement:
+
+```text
+DownloadManager
+```
+
+with:
+
+```text
+DownloadQueue
+DownloadTask
+DownloadWorker
+DownloadProgress
+DownloadState
+```
+
+Example states:
+
+```text
+Queued
+Resolving
+Downloading
+Verifying
+Completed
+Paused
+Cancelled
+Failed
+Unavailable
+```
+
+Each task should contain:
+
+```text
+AnimeId
+EpisodeId
+Quality
+Destination
+Priority
+Status
+Progress
+BytesDownloaded
+TotalBytes
+Speed
+ETA
+Error
+CancellationToken
+```
+
+---
+
+# 17. DOWNLOAD PROGRESS
+
+Display:
+
+```text
+Episode 12
+1080p
+
+████████████░░░ 82%
+
+1.42 GB / 1.73 GB
+
+Speed: 8.4 MB/s
+ETA: 36 sec
+```
+
+Do not update the UI on every byte.
+
+Throttle UI updates.
+
+For example:
+
+```text
+100–250 ms
+```
+
+or another measured interval.
+
+The downloader itself should not be throttled unnecessarily.
+
+---
+
+# 18. RESUME DOWNLOAD
+
+If technically supported by the legitimate source, implement HTTP range/resume behavior.
+
+If a download is interrupted:
+
+```text
+Downloading Episode 12
+82%
+```
+
+After restarting AVC-Anime:
+
+```text
+Resume download?
+```
+
+or automatically resume depending on settings.
+
+Use:
+
+```text
+Range
+ETag
+Last-Modified
+```
+
+only when supported by the source.
+
+If the source does not support resume, safely restart the download.
+
+Do not corrupt the final file.
+
+---
+
+# 19. ATOMIC FILE CREATION
+
+Never write directly to the final filename.
+
+Use:
+
+```text
+Episode 001.mp4.part
+```
+
+while downloading.
+
+After successful verification:
+
+```text
+Episode 001.mp4.part
+       ↓
+verify
+       ↓
+Episode 001.mp4
+```
+
+This prevents a partially downloaded file from appearing as a valid episode.
+
+---
+
+# 20. FILE VALIDATION
+
+After downloading:
+
+verify:
+
+* file exists
+* file size > 0
+* expected content type
+* container is readable
+* duration can be detected
+* media stream exists
+* optional checksum
+* no obvious HTML error page was saved as `.mp4`
+
+This is important because a failed HTTP request might otherwise be saved as:
+
+```text
+episode.mp4
+```
+
+even though the file actually contains an HTML error page.
+
+Do not mark such a file as downloaded.
+
+---
+
+# 21. DISK SPACE
+
+Before downloading:
+
+calculate required disk space when possible.
+
+Check available disk space.
+
+Example:
+
+```text
+Required:
+3.8 GB
+
+Available:
+1.2 GB
+
+Not enough disk space.
+```
+
+For "Download All", estimate the total.
+
+If the available space is insufficient:
+
+* warn the user
+* do not start a queue that will obviously fail
+
+Monitor disk space during long downloads.
+
+---
+
+# 22. DOWNLOAD CLEANUP
+
+Add:
+
+```text
+Delete episode
+Delete selected
+Delete anime
+Clear failed downloads
+Clear incomplete downloads
+```
+
+Deleting should remove:
+
+* media file
+* subtitle file if associated
+* metadata
+* temporary `.part` file
+
+Do not delete unrelated files from the Offline folder.
+
+---
+
+# 23. STORAGE SCANNER
+
+Implement an optional scanner:
+
+```text
+OfflineStorageScanner
+```
+
+It should detect:
+
+* files manually copied into the Offline directory
+* files whose metadata still exists
+* missing files
+* corrupted files
+* orphan metadata
+* orphan media
+
+Example:
+
+```text
+Offline database says:
+Episode 5 exists
+
+File:
+missing
+```
+
+Then mark:
+
+```text
+Unavailable / Missing
+```
+
+Do not crash.
+
+---
+
+# 24. OFFLINE WATCH PROGRESS
+
+When watching a local episode:
+
+save:
+
+```text
+CurrentTime
+Duration
+Completed
+LastPlayedAt
+```
+
+Do not write to the database every video frame.
+
+Use checkpoints.
+
+For example:
+
+```text
+every 5–10 seconds
+```
+
+and immediately when:
+
+* pause
+* stop
+* close player
+* episode ends
+
+Use the existing watch-progress system.
+
+---
+
+# 25. ONLINE SYNCHRONIZATION
+
+When the user returns online:
+
+if the user is authenticated and the site supports legitimate synchronization:
+
+sync offline watch progress back to the user's account.
+
+Example:
+
+```text
+Offline:
+Episode 7
+23:41 / 24:10
+Completed
+```
+
+After Internet returns:
+
+```text
+Syncing watch progress...
+✓
+```
+
+Do not overwrite newer server progress blindly.
+
+Use timestamps/versioning where possible.
+
+If the site does not provide a supported API/mechanism for this, keep the progress local instead of inventing an undocumented API.
+
+---
+
+# 26. OFFLINE NEXT EPISODE
+
+When playing offline:
+
+if current episode finishes:
+
+```text
+Episode 5 finished
+
+Episode 6 downloaded?
+```
+
+If yes:
+
+```text
+Automatically play Episode 6
+```
+
+If not:
+
+```text
+Episode 6 is not available offline.
+```
+
+Do not attempt to access the network when Offline Mode is active.
+
+---
+
+# 27. VOICE CONTROL
+
+Integrate Offline Library with the existing voice parser.
+
+Examples:
+
+```text
+"Открой офлайн библиотеку"
+
+"Покажи скачанные серии"
+
+"Открой Фрирен"
+
+"Запусти первую серию"
+
+"Запусти 6 серию"
+
+"Скачай 8 серию"
+
+"Скачай серии с 1 по 12"
+
+"Скачай все серии"
+
+"Останови скачивание"
+
+"Возобнови скачивание"
+
+"Удалить 5 серию"
+
+"Удалить скачанные серии"
+
+"Следующая серия"
+
+"Предыдущая серия"
+```
+
+Russian number parsing must use the existing number parser.
+
+Do not add an LLM call for ordinary commands.
+
+The parser should produce structured commands.
+
+Example:
+
+```text
+DownloadEpisode
+Anime = Frieren
+Episode = 8
+Quality = 1080p
+```
+
+---
+
+# 28. VOICE DOWNLOAD CONFIRMATION
+
+For destructive actions such as:
+
+```text
+"Удалить все серии Фрирен"
+```
+
+require confirmation.
+
+Example:
+
+```text
+Удалить 28 локально сохранённых серий Фрирен?
+
+"Да" / "Нет"
+```
+
+Do not require confirmation for:
+
+```text
+download episode
+download selected
+download all
+```
+
+unless the download is extremely large.
+
+---
+
+# 29. DOWNLOAD NOTIFICATION
+
+Add unobtrusive application notifications.
+
+Examples:
+
+```text
+Episode 8 download started
+Episode 8 downloaded
+Episode 9 failed
+Not enough disk space
+```
+
+Do not interrupt playback with modal dialogs for ordinary download events.
+
+---
+
+# 30. MULTIPLE DOWNLOADS
+
+Default:
+
+```text
+2 concurrent downloads
+```
+
+Make configurable:
+
+```text
+1
+2
+3
+4
+```
+
+Do not allow unlimited concurrent downloads.
+
+Respect the site's legitimate access constraints.
+
+Do not attempt to bypass rate limits.
+
+Do not aggressively retry.
+
+Use exponential backoff for transient errors.
+
+---
+
+# 31. RETRY SYSTEM
+
+For temporary failures:
+
+```text
+Retry 1
+Retry 2
+Retry 3
+```
+
+with backoff.
+
+Do not retry indefinitely.
+
+Classify errors:
+
+```text
+NetworkError
+Timeout
+ServerError
+NotFound
+Unauthorized
+Forbidden
+UnsupportedOfflineSource
+DiskFull
+InvalidMedia
+Cancelled
+Unknown
+```
+
+`UnsupportedOfflineSource` must not be retried repeatedly.
+
+---
+
+# 32. AUTHENTICATION
+
+The downloader must use the existing authenticated WebView/session architecture when the legitimate download mechanism requires authentication.
+
+Do not:
+
+* extract cookies manually
+* dump cookies
+* log authentication tokens
+* copy session tokens into logs
+* bypass authentication
+* bypass CAPTCHA
+* bypass 2FA
+* bypass DRM
+* bypass signed URL expiration
+* defeat access-control mechanisms
+
+If authentication is required, use the supported WebView2/session mechanism.
+
+---
+
+# 33. SECURITY
+
+Never execute downloaded media as code.
+
+Treat downloaded files as untrusted media.
+
+Validate file extensions/content.
+
+Do not allow:
+
+```text
+.exe
+.dll
+.bat
+.cmd
+.ps1
+.js
+.vbs
+```
+
+to be imported as media.
+
+The Offline Library should only recognize supported media/subtitle formats.
+
+---
+
+# 34. SUBTITLES
+
+If the legitimate offline source provides subtitles separately:
+
+store them alongside the episode.
+
+Example:
+
+```text
+Episode 001 - Title.mp4
+Episode 001 - Title.ru.srt
+Episode 001 - Title.en.srt
+```
+
+Metadata should record available subtitle languages.
+
+If subtitles are embedded in the video, no separate file is necessary.
+
+Do not attempt to bypass protected subtitle delivery.
+
+---
+
+# 35. AUDIO TRACKS
+
+If the legitimate downloadable media contains multiple audio tracks:
+
+preserve them.
+
+The offline player should expose the existing audio-track selector.
+
+Do not transcode unnecessarily.
+
+Do not reduce quality unless the user explicitly chooses conversion.
+
+---
+
+# 36. VIDEO FORMAT
+
+Prefer the source's original supported format when practical.
+
+Do not automatically transcode every episode.
+
+If the source is already:
+
+```text
+MP4
+WebM
+MKV
+```
+
+and the existing player supports it, preserve it.
+
+Only introduce transcoding if there is a real compatibility requirement.
+
+If transcoding is implemented, make it optional and clearly separated from downloading.
+
+---
+
+# 37. NO UNNECESSARY TRANSCODING
+
+The ideal pipeline is:
+
+```text
+legitimate source
+       ↓
+download
+       ↓
+validate
+       ↓
+store
+       ↓
+play
+```
+
+Not:
+
+```text
+source
+ ↓
+decode
+ ↓
+re-encode
+ ↓
+encode
+ ↓
+store
+```
+
+unless required.
+
+This saves:
+
+* CPU
+* GPU
+* disk space
+* time
+* quality
+
+---
+
+# 38. OFFLINE PLAYER AND WEBVIEW2
+
+Do not require the online YummyAnime page to play a local file.
+
+Prefer a dedicated local playback path integrated with the existing PlayerController.
+
+If the current architecture uses WebView2 video playback and local playback can safely be supported through it, evaluate that option.
+
+However, do not force local media through the remote website if that creates unnecessary dependencies.
+
+The important requirement is:
+
+```text
+Internet OFF
+YummyAnime OFFLINE
+Local episode still plays
+```
+
+---
+
+# 39. OFFLINE STARTUP
+
+When AVC-Anime starts without Internet:
+
+DO NOT:
+
+```text
+wait for YummyAnime
+wait for API
+wait for remote metadata
+```
+
+before displaying the application.
+
+Startup should immediately initialize:
+
+```text
+Local database
+Offline Library
+Local settings
+Local media index
+```
+
+Then show:
+
+```text
+Offline Mode
+```
+
+if online services are unavailable.
+
+---
+
+# 40. INTERNET DETECTION
+
+Implement a lightweight connectivity state.
+
+Possible:
+
+```text
+Online
+Offline
+Connecting
+Unknown
+```
+
+Do not continuously poll the Internet every second.
+
+Use sensible connectivity events/checks.
+
+Do not let connectivity detection consume CPU.
+
+---
+
+# 41. OFFLINE CACHE VS DOWNLOAD
+
+Internally distinguish:
+
+```text
+OfflineDownload
+```
+
+from:
+
+```text
+TemporaryCache
+```
+
+A downloaded episode is persistent.
+
+A temporary browser cache should not be treated as a permanent offline episode.
+
+The Offline Library should only show explicitly saved/validated media.
+
+---
+
+# 42. STORAGE SETTINGS
+
+Add settings:
+
+```text
+Offline storage:
+D:\AVC-Anime\Offline
+
+Maximum storage:
+Unlimited
+
+Concurrent downloads:
+2
+
+Preferred quality:
+1080p
+
+Prefer local playback:
+ON
+
+Automatically resume downloads:
+ON
+```
+
+Allow:
+
+```text
+Change storage location
+Open storage folder
+Calculate storage usage
+Clear temporary files
+```
+
+---
+
+# 43. STORAGE USAGE
+
+Display:
+
+```text
+Offline Storage
+
+Used:
+82.4 GB
+
+Free:
+412 GB
+
+Episodes:
+84
+
+Anime:
+7
+```
+
+Per-anime:
+
+```text
+Frieren
+18.2 GB
+28 episodes
+```
+
+Per-episode:
+
+```text
+Episode 12
+1.42 GB
+1080p
+24:10
+```
+
+---
+
+# 44. SAFE MOVING OF OFFLINE STORAGE
+
+If the user changes:
+
+```text
+Offline/
+```
+
+to:
+
+```text
+D:\AnimeOffline\
+```
+
+provide:
+
+```text
+Move existing files
+```
+
+instead of simply changing the path and orphaning the old files.
+
+Use:
+
+```text
+copy
+verify
+update metadata
+delete old
+```
+
+Do not delete old files until the new copy is verified.
+
+---
+
+# 45. CORRUPTION RECOVERY
+
+If a local file becomes corrupted:
+
+mark:
+
+```text
+Corrupted
+```
+
+Offer:
+
+```text
+Delete
+Redownload
+```
+
+Do not silently attempt to play a broken file indefinitely.
+
+---
+
+# 46. DATABASE MIGRATION
+
+If AVC-Anime already has a database, extend it with migrations.
+
+Do not delete existing:
+
+* history
+* bookmarks
+* settings
+* accounts
+* player state
+
+during installation/update.
+
+Existing application data must survive updates.
+
+---
+
+# 47. PORTABLE APPLICATION
+
+The application is intended to be portable where practical.
+
+Do not hard-code absolute paths.
+
+Use:
+
+```text
+ApplicationDirectory
+DataDirectory
+OfflineDirectory
+```
+
+resolved at runtime.
+
+For portable builds:
+
+```text
+AVC-Anime/
+├── AVC-Anime.exe
+├── Offline/
+└── Data/
+```
+
+For installed builds where the executable directory is not writable, use a user-writable fallback and let the user choose the location.
+
+---
+
+# 48. AD BLOCK INTERACTION
+
+The existing AdBlock must NOT affect legitimate offline playback.
+
+When playing:
+
+```text
+LocalEpisodeSource
+```
+
+there should be no unnecessary WebView2 network requests.
+
+No advertisement should be loaded for local playback.
+
+The Offline player should bypass the online advertisement pipeline entirely.
+
+---
+
+# 49. PERFORMANCE
+
+The offline system must be lightweight.
+
+Do not:
+
+* scan the entire Offline folder every second
+* calculate hashes continuously
+* read the entire video to determine progress
+* update UI on every byte
+* reload the database repeatedly
+* create huge in-memory video buffers
+
+Use:
+
+* indexed metadata
+* filesystem events where useful
+* periodic/lightweight synchronization
+* incremental scanning
+* asynchronous I/O
+* cancellation tokens
+* bounded concurrency
+
+---
+
+# 50. APPLICATION SHUTDOWN
+
+If AVC-Anime closes while downloading:
+
+save queue state.
+
+On next startup:
+
+```text
+3 downloads interrupted.
+
+Resume?
+```
+
+or automatically resume according to settings.
+
+Never leave the application in a state where it believes an incomplete `.part` file is a finished episode.
+
+---
+
+# 51. LOGGING
+
+Create useful logs:
+
+```text
+[Offline]
+Episode queued
+
+[Offline]
+Resolving episode
+
+[Offline]
+Download started
+
+[Offline]
+Progress: 42%
+
+[Offline]
+Download completed
+
+[Offline]
+Validation successful
+
+[Offline]
+Episode registered
+
+[Offline]
+Playback started
+```
+
+Never log:
+
+* passwords
+* cookies
+* authentication headers
+* access tokens
+* private signed URLs
+* sensitive account data
+
+Sanitize URLs if necessary.
+
+---
+
+# 52. DIAGNOSTICS
+
+Add an offline diagnostic page.
+
+Display:
+
+```text
+Storage path
+Storage writable
+Free disk space
+Database status
+Downloaded episodes
+Active downloads
+Failed downloads
+Temporary files
+```
+
+Example:
+
+```text
+Offline Storage
+----------------
+
+Path:
+D:\AVC-Anime\Offline
+
+Writable:
+YES
+
+Free:
+412 GB
+
+Episodes:
+84
+
+Anime:
+7
+
+Active downloads:
+2
+
+Failed:
+1
+```
+
+---
+
+# 53. TESTING
+
+Create automated tests for:
+
+### Database
+
+* create episode
+* update episode
+* delete episode
+* migration
+* missing file
+* corrupted metadata
+
+### Download manager
+
+* queue
+* cancel
+* retry
+* resume
+* concurrent downloads
+* disk full
+* network failure
+* invalid media
+
+### Storage
+
+* folder creation
+* filename sanitization
+* duplicate anime
+* Unicode
+* long names
+* missing folders
+
+### Player
+
+* local playback
+* pause
+* resume
+* seek
+* fullscreen
+* volume
+* subtitles
+* next episode
+* progress saving
+
+### Offline
+
+* Internet unavailable
+* online site unavailable
+* local episode available
+* local episode unavailable
+
+### Voice
+
+* open offline
+* play downloaded episode
+* download episode
+* download all
+* cancel download
+* delete episode
+* next offline episode
+
+---
+
+# 54. REAL-WORLD ACCEPTANCE TEST
+
+Perform this exact test:
+
+1. Start AVC-Anime with Internet.
+2. Open an anime.
+3. Download one episode using the legitimate supported source.
+4. Verify the file appears in:
+
+```text
+Offline/<Anime>/Season 01/
+```
+
+5. Close AVC-Anime.
+6. Disconnect Internet.
+7. Start AVC-Anime.
+8. Open Offline Library.
+9. Open the downloaded anime.
+10. Open the downloaded episode.
+11. Confirm video starts.
+12. Confirm seek works.
+13. Confirm fullscreen works.
+14. Confirm subtitles work if downloaded.
+15. Confirm watch progress saves.
+16. Play the next downloaded episode.
+17. Confirm no Internet is required.
+
+Then reconnect Internet.
+
+18. Verify application returns to Online mode.
+19. Verify online playback still works.
+20. Verify local downloads remain intact.
+21. Verify watch progress synchronization if supported.
+
+---
+
+# 55. IMPORTANT: DO NOT INVENT A DOWNLOAD API
+
+Before implementing the downloader:
+
+inspect the actual YummyAnime integration.
+
+Determine whether there is a legitimate:
+
+* download endpoint
+* offline endpoint
+* downloadable media URL
+* documented API
+* browser-supported download mechanism
+
+If there is no legitimate download mechanism:
+
+DO NOT:
+
+* bypass DRM
+* decrypt protected media
+* bypass signed URLs
+* defeat token expiration
+* extract protected streams
+* intercept protected media specifically to circumvent restrictions
+* reverse engineer DRM
+* bypass access controls
+
+Instead implement the Offline subsystem so that it is ready for a legitimate source and clearly report:
+
+```text
+Offline download is not supported by the current source.
+```
+
+---
+
+# 56. IMPORTANT DISTINCTION
+
+Do not confuse:
+
+```text
+WebView2 browser cache
+```
+
+with:
+
+```text
+User's Offline Library
+```
+
+Browser cache is temporary and controlled by WebView2.
+
+Offline Library is explicit user-managed persistent storage.
+
+The user must know exactly what is saved.
+
+---
+
+# 57. ARCHITECTURE
+
+Prefer something similar to:
+
+```text
+IOfflineMediaService
+        |
+        +-- DownloadManager
+        |
+        +-- DownloadQueue
+        |
+        +-- MediaResolver
+        |
+        +-- OfflineStorageService
+        |
+        +-- OfflineLibraryService
+        |
+        +-- OfflinePlaybackService
+        |
+        +-- OfflineWatchProgressService
+        |
+        +-- OfflineStorageScanner
+```
+
+Integrate with:
+
+```text
+YummyAnimeAdapter
+PlayerStateService
+PlayerController
+VoiceCommandParser
+AuthenticationService
+WatchHistoryService
+Database
+SettingsService
+```
+
+Do not duplicate existing services.
+
+---
+
+# 58. ABSTRACT SOURCE
+
+Create an abstraction similar to:
+
+```text
+IOfflineMediaSourceResolver
+```
+
+It should return information such as:
+
+```text
+CanDownload
+EpisodeId
+Quality
+MediaType
+Source
+Size
+Duration
+Subtitles
+AudioTracks
+```
+
+For unsupported sources:
+
+```text
+CanDownload = false
+Reason = UnsupportedOfflineSource
+```
+
+This keeps the downloader independent from YummyAnime-specific implementation.
+
+---
+
+# 59. MULTI-SITE FUTURE SUPPORT
+
+The application may support more anime websites in the future.
+
+Do not hard-code all download functionality into:
+
+```text
+YummyAnimeAdapter
+```
+
+Instead:
+
+```text
+ISiteAdapter
+    |
+    +-- YummyAnimeAdapter
+    |
+    +-- OtherAnimeSiteAdapter
+```
+
+and:
+
+```text
+IOfflineMediaSourceResolver
+```
+
+per site where necessary.
+
+---
+
+# 60. FINAL IMPLEMENTATION REQUIREMENTS
+
+Before finishing:
+
+1. Inspect existing project.
+2. Reuse existing services.
+3. Implement database migration.
+4. Implement offline storage.
+5. Implement download queue.
+6. Implement download manager.
+7. Implement validation.
+8. Implement offline library.
+9. Implement local playback.
+10. Implement voice commands.
+11. Implement offline watch progress.
+12. Implement optional synchronization.
+13. Implement storage management.
+14. Implement diagnostics.
+15. Implement tests.
+16. Build Release.
+17. Test the actual packaged application.
+
+Do not stop after creating UI.
+
+The feature must be fully functional end-to-end.
+
+---
+
+# FINAL REPORT
+
+After implementation, report:
+
+## Architecture
+
+List all created/modified components.
+
+## Storage
+
+Show the actual folder structure.
+
+## Database
+
+Show new tables/fields/migrations.
+
+## Download
+
+Explain how legitimate downloadable sources are resolved.
+
+## Offline playback
+
+Explain how local episodes are selected and played.
+
+## Voice
+
+List implemented Russian voice commands.
+
+## Performance
+
+Report:
+
+* startup impact
+* download concurrency
+* memory usage
+* CPU usage
+* UI update frequency
+
+## Testing
+
+Provide PASS/FAIL for:
+
+* single episode
+* multiple episodes
+* all episodes
+* cancellation
+* resume
+* retry
+* corrupted file
+* disk full
+* offline startup
+* local playback
+* subtitles
+* fullscreen
+* progress
+* next episode
+* voice control
+* online return
+* database migration
+
+## Known limitations
+
+Clearly state anything that cannot be implemented because the source does not provide a legitimate offline/download mechanism.
+
+Do not claim that protected streams can be downloaded if they cannot legally/technically be accessed through the site's supported mechanism.
+
+The implementation must prioritize reliability, clean architecture, offline usability, data integrity, and preservation of all existing AVC-Anime functionality.

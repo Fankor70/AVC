@@ -1,0 +1,2140 @@
+# YummyAnime Real-Site Account Integration, Persistent Session, User Data Synchronization, and Low-Overhead Live Updates
+
+You are working on an existing Windows desktop application called **Anime Voice Control**.
+
+The application is a C# / .NET 8 / WPF application using MVVM and WebView2.
+
+The application currently embeds YummyAnime and provides voice control, playback control, tabs, search, episode navigation, fullscreen, autoplay, watch history, and other functionality.
+
+I now need a production-quality integration with the **real YummyAnime website**.
+
+The key requirement is:
+
+> The application must use the REAL YummyAnime website and the user's REAL YummyAnime account/session.
+
+Do NOT create a fake local authentication system.
+
+Do NOT create a fake local representation of the account as the source of truth.
+
+Do NOT invent an undocumented YummyAnime API.
+
+The real website must remain the source of truth whenever the website provides the required information.
+
+---
+
+# 1. PRIMARY OBJECTIVE
+
+Implement a complete account integration layer that allows the user to:
+
+1. Open YummyAnime inside the application.
+2. Log into YummyAnime normally through the real website.
+3. Keep the authenticated session between application launches.
+4. Detect whether the user is currently logged in.
+5. Read user-visible account information from the authenticated website.
+6. Read the user's:
+
+   * username / display name
+   * avatar
+   * watch history
+   * watched episodes
+   * watch progress when available
+   * bookmarks / favorites
+   * saved anime
+   * profile information that is actually exposed by the website
+7. Keep the application's UI synchronized with the real website.
+8. Detect relevant changes made on the website.
+9. Update the application without constantly hammering the website.
+10. Keep synchronization lightweight and asynchronous.
+11. Avoid unnecessary network requests.
+12. Preserve the real website's authentication/session behavior.
+
+---
+
+# 2. VERY IMPORTANT: FIRST INSPECT THE REAL WEBSITE
+
+Before implementing assumptions, inspect the currently accessible YummyAnime website.
+
+Use the actual site behavior.
+
+Determine:
+
+* login URL
+* logout URL/action
+* profile URL
+* avatar source
+* username/display-name location
+* bookmarks/favorites URL
+* history URL
+* watched state representation
+* episode progress representation
+* anime page URL structure
+* episode URL structure
+* search URL structure
+* relevant XHR/fetch requests
+* relevant JSON responses if the site exposes them
+* relevant DOM structures
+* SPA navigation behavior
+* page reload behavior
+* authentication behavior
+* whether the site uses REST, GraphQL, XHR, fetch, HTML navigation, or another mechanism
+* whether watch state is stored server-side
+* whether bookmarks are stored server-side
+* whether changes are reflected immediately after an action
+* whether there are CSRF protections
+* whether there are rate limits
+
+DO NOT guess these values.
+
+Create a site-specific adapter:
+
+```text
+YummyAnimeAdapter
+```
+
+All YummyAnime-specific selectors, URLs, DOM logic, and synchronization logic must be isolated inside this adapter.
+
+Do not scatter YummyAnime-specific selectors throughout the application.
+
+---
+
+# 3. AUTHENTICATION ARCHITECTURE
+
+Use WebView2 for the normal website login flow.
+
+The user should see the real YummyAnime login page.
+
+Example:
+
+```text
+Anime Voice Control
+        ↓
+YummyAnime
+        ↓
+Login page
+        ↓
+User enters credentials
+        ↓
+Real YummyAnime authentication
+        ↓
+Authenticated WebView2 session
+```
+
+The application must NOT:
+
+* scrape passwords
+* log passwords
+* send passwords to an external server
+* extract authentication tokens unnecessarily
+* copy authentication cookies into a separate authentication system
+* bypass CAPTCHA
+* bypass 2FA
+* bypass anti-bot systems
+* forge authentication requests
+* impersonate another client
+* bypass access controls
+
+If YummyAnime provides a normal login form, let the website perform the login normally.
+
+WebView2's persistent user-data/profile storage should be used so that the authenticated session can survive application restarts.
+
+Use an application-specific WebView2 profile, for example:
+
+```text
+%LOCALAPPDATA%\AnimeVoiceControl\WebView2\YummyAnimeProfile
+```
+
+Do not use a temporary profile for the normal authenticated session.
+
+---
+
+# 4. AUTHENTICATION SERVICE
+
+Create:
+
+```csharp
+interface IAuthenticationService
+```
+
+and:
+
+```csharp
+class YummyAnimeAuthenticationService
+```
+
+Possible states:
+
+```csharp
+Unknown
+Checking
+LoggedOut
+LoggingIn
+LoggedIn
+SessionExpired
+LoginFailed
+```
+
+Expose:
+
+```csharp
+Task<AuthState> CheckAuthenticationAsync();
+Task OpenLoginAsync();
+Task LogoutAsync();
+Task RefreshAuthenticationStateAsync();
+```
+
+Authentication detection should preferably use visible website state or site-supported behavior.
+
+Do not treat the existence of a random cookie as proof of successful authentication.
+
+---
+
+# 5. WEBVIEW2 PROFILE
+
+Create WebView2 with a persistent user-data directory.
+
+Example conceptual configuration:
+
+```text
+%LOCALAPPDATA%
+└── AnimeVoiceControl
+    └── WebView2
+        └── YummyAnimeProfile
+```
+
+The profile must persist:
+
+* cookies
+* local storage
+* session storage where appropriate
+* website preferences
+* normal WebView2 browsing state
+
+Do not manually copy cookies into another browser.
+
+Do not manually serialize authentication cookies into the application's own database.
+
+The WebView2 profile should remain the primary session container.
+
+---
+
+# 6. ACCOUNT DATA MODEL
+
+Create a local read-only cache model.
+
+Example:
+
+```csharp
+class UserAccountSnapshot
+{
+    string? UserId;
+    string? Username;
+    string? DisplayName;
+    string? AvatarUrl;
+
+    bool IsAuthenticated;
+
+    DateTimeOffset LastSuccessfulSync;
+}
+```
+
+The local database/cache is NOT the source of truth.
+
+It is only a performance optimization and UI cache.
+
+---
+
+# 7. WATCH HISTORY
+
+Create:
+
+```csharp
+class RemoteWatchHistoryItem
+{
+    string AnimeId;
+    string EpisodeId;
+    string? AnimeTitle;
+    string? EpisodeTitle;
+
+    double? ProgressSeconds;
+    double? DurationSeconds;
+
+    DateTimeOffset? LastWatched;
+}
+```
+
+The exact fields must be adapted to what YummyAnime actually exposes.
+
+The application must distinguish:
+
+```text
+REMOTE DATA
+```
+
+from:
+
+```text
+LOCAL CACHE
+```
+
+Remote YummyAnime state is authoritative.
+
+If the user watches an episode in the application:
+
+```text
+WebView2
+    ↓
+Real YummyAnime
+    ↓
+Website updates watch state
+    ↓
+Application detects/requests updated state
+    ↓
+Local cache updated
+```
+
+Do NOT only update the local database and pretend the website was updated.
+
+---
+
+# 8. BOOKMARKS / FAVORITES
+
+Create a site adapter method such as:
+
+```csharp
+Task<IReadOnlyList<AnimeBookmark>> GetBookmarksAsync();
+```
+
+Use the actual YummyAnime implementation.
+
+Do not invent an API endpoint.
+
+If bookmarks are represented by HTML:
+
+* navigate to the relevant page when necessary
+* inspect the DOM
+* extract the required information
+* cache the result
+
+If YummyAnime exposes a legitimate JSON/XHR response that the authenticated page itself uses, the adapter may consume that response where technically appropriate.
+
+---
+
+# 9. AVATAR
+
+The application should display the user's actual YummyAnime avatar.
+
+Prefer:
+
+```text
+real avatar URL
+```
+
+instead of downloading and permanently duplicating the image unnecessarily.
+
+Implement image caching with:
+
+```text
+URL
+ETag / Last-Modified where available
+LastChecked
+LocalCachePath
+```
+
+Only redownload when the avatar has changed or the cached copy is stale.
+
+Do not repeatedly download the avatar every time the UI redraws.
+
+---
+
+# 10. REMOTE-FIRST DATA ARCHITECTURE
+
+Use this principle:
+
+```text
+YummyAnime
+    ↓
+Remote source of truth
+    ↓
+Synchronization service
+    ↓
+Local cache
+    ↓
+Application UI
+```
+
+NOT:
+
+```text
+Local database
+    ↓
+pretend it is YummyAnime
+```
+
+The local database exists for:
+
+* fast UI rendering
+* offline display of previously known information
+* reducing repeated requests
+* comparison with previous remote state
+* detecting changes
+* preserving application state
+
+---
+
+# 11. SYNCHRONIZATION ENGINE
+
+Create:
+
+```csharp
+interface ISiteSyncService
+```
+
+and:
+
+```csharp
+class YummyAnimeSyncService
+```
+
+The service must synchronize:
+
+```text
+Account
+Profile
+Avatar
+Bookmarks
+Watch history
+Watch progress
+Relevant settings if available
+```
+
+Do NOT constantly poll every page.
+
+---
+
+# 12. NO AGGRESSIVE POLLING
+
+This is extremely important.
+
+DO NOT implement:
+
+```text
+while(true)
+{
+    GET profile
+    GET history
+    GET bookmarks
+    wait 1 second
+}
+```
+
+This is forbidden.
+
+It would waste:
+
+* network bandwidth
+* CPU
+* browser resources
+* website resources
+* battery/power
+* application performance
+
+Instead use an event-driven and cache-aware strategy.
+
+---
+
+# 13. SYNCHRONIZATION TRIGGERS
+
+Synchronize when one of these events occurs:
+
+### A. Application startup
+
+Perform one initial synchronization.
+
+Priority:
+
+```text
+Authentication
+↓
+Profile
+↓
+Bookmarks
+↓
+Recent watch history
+```
+
+Do not block application startup while waiting for every request.
+
+The UI should become usable immediately.
+
+Show cached information first when available.
+
+Then update it asynchronously.
+
+---
+
+### B. Successful login
+
+Immediately perform:
+
+```text
+Full account synchronization
+```
+
+because the application may previously have been logged out.
+
+---
+
+### C. User opens account page
+
+Refresh account data if the cache is stale.
+
+---
+
+### D. User opens bookmarks
+
+Refresh bookmarks if stale.
+
+Do not refresh bookmarks every second.
+
+---
+
+### E. User opens history
+
+Refresh watch history if stale.
+
+---
+
+### F. User starts watching an episode
+
+Do not immediately download the entire history.
+
+Instead:
+
+```text
+Update current episode state
+```
+
+and synchronize the relevant item.
+
+---
+
+### G. Episode finishes
+
+Immediately attempt to synchronize the relevant watch state.
+
+---
+
+### H. Bookmark changed
+
+After a bookmark/favorite action:
+
+```text
+perform action
+↓
+wait for website confirmation
+↓
+refresh affected bookmark state
+```
+
+Do not reload the entire account.
+
+---
+
+### I. Website navigation
+
+If navigation changes to:
+
+```text
+/profile
+/history
+/bookmarks
+/anime/...
+/episode/...
+```
+
+the adapter may trigger a targeted synchronization.
+
+---
+
+# 14. CACHE TTL
+
+Implement configurable TTL values.
+
+Example starting values:
+
+```text
+Account/profile:
+5 minutes
+
+Avatar:
+30 minutes
+
+Bookmarks:
+2 minutes
+
+Watch history:
+1–2 minutes
+
+Current episode:
+30–60 seconds while actively watching
+
+Completed episode:
+immediate targeted refresh
+
+Static anime metadata:
+30 minutes or longer
+```
+
+These are defaults, not hardcoded truths.
+
+Make them configurable.
+
+When the user explicitly opens a page, prioritize freshness over TTL if doing so does not create excessive traffic.
+
+---
+
+# 15. SMART SYNCHRONIZATION
+
+Do not synchronize everything after every event.
+
+Example:
+
+User changes one bookmark:
+
+BAD:
+
+```text
+Refresh account
+Refresh avatar
+Refresh entire history
+Refresh all anime metadata
+Refresh bookmarks
+```
+
+GOOD:
+
+```text
+Bookmark action
+↓
+verify action
+↓
+refresh bookmarks
+```
+
+Example:
+
+Episode ends:
+
+BAD:
+
+```text
+refresh everything
+```
+
+GOOD:
+
+```text
+episode completed
+↓
+sync affected watch item
+↓
+optionally refresh recent history
+```
+
+---
+
+# 16. NETWORK-AWARE SYNCHRONIZATION
+
+Use:
+
+```csharp
+CancellationToken
+SemaphoreSlim
+Debounce
+Throttle
+Retry with backoff
+```
+
+Prevent duplicate simultaneous sync operations.
+
+Example:
+
+```text
+5 events happen in 500 ms
+
+Do NOT execute:
+
+Sync()
+Sync()
+Sync()
+Sync()
+Sync()
+```
+
+Instead:
+
+```text
+events
+ ↓
+debounce
+ ↓
+one synchronization request
+```
+
+---
+
+# 17. CONCURRENT SYNCHRONIZATION CONTROL
+
+Only one synchronization of a particular resource should run at a time.
+
+For example:
+
+```text
+BookmarksSync
+HistorySync
+ProfileSync
+```
+
+can have independent locks.
+
+But:
+
+```text
+Bookmark changed
+Bookmark page opened
+Bookmark timer expired
+```
+
+must not create three simultaneous bookmark requests.
+
+Collapse them into one operation.
+
+---
+
+# 18. NETWORK REQUEST MONITORING
+
+WebView2 provides APIs for observing web resource requests and responses.
+
+Use this capability carefully and only where it genuinely improves synchronization.
+
+Do not capture every network request.
+
+Do not log:
+
+* passwords
+* authentication headers
+* access tokens
+* refresh tokens
+* session cookies
+* sensitive personal data
+
+Filter requests narrowly to relevant YummyAnime resources.
+
+Possible useful categories:
+
+```text
+profile
+bookmarks
+history
+watch state
+anime metadata
+```
+
+If the site has legitimate JSON/XHR requests used by the page itself, inspect and document them.
+
+Do not invent endpoints.
+
+Do not blindly intercept all network traffic.
+
+Microsoft documents WebView2's WebResourceRequested/WebResourceResponseReceived mechanisms for monitoring and modifying web requests, but recommends using simpler APIs where possible.
+
+---
+
+# 19. DOM-BASED FALLBACK
+
+If a required piece of data is only available in the rendered page:
+
+Use controlled JavaScript DOM extraction.
+
+Example:
+
+```csharp
+ExecuteScriptAsync(...)
+```
+
+Extract only the required data.
+
+Do NOT scrape the entire DOM repeatedly.
+
+Bad:
+
+```text
+Every 1 second:
+serialize entire document
+```
+
+Good:
+
+```text
+specific page opened
+↓
+query specific elements
+↓
+extract small JSON object
+```
+
+---
+
+# 20. MUTATION OBSERVER
+
+Where appropriate, inject a small JavaScript observer into relevant YummyAnime pages.
+
+Example use cases:
+
+* bookmark button state changes
+* login state changes
+* profile avatar changes
+* watch state UI changes
+* SPA navigation
+* player episode changes
+
+Do NOT use a global MutationObserver over the entire document with expensive processing.
+
+Bad:
+
+```javascript
+new MutationObserver(() => {
+    scanEntireDOM();
+});
+```
+
+Good:
+
+```javascript
+observe specific container
+↓
+filter relevant mutation
+↓
+emit tiny event
+```
+
+Debounce mutation events.
+
+---
+
+# 21. SPA NAVIGATION
+
+YummyAnime may change pages without a complete browser reload.
+
+Therefore implement:
+
+```text
+NavigationStarting
+ContentLoading
+SourceChanged
+HistoryChanged
+NavigationCompleted
+```
+
+and detect relevant SPA state changes when necessary.
+
+Do not assume:
+
+```text
+NavigationCompleted == full website reload
+```
+
+Create:
+
+```csharp
+ISiteNavigationMonitor
+```
+
+---
+
+# 22. EVENT BRIDGE BETWEEN WEBSITE AND C#
+
+Use a small controlled bridge.
+
+Example conceptual flow:
+
+```text
+YummyAnime JavaScript
+        ↓
+small event
+        ↓
+WebView2
+        ↓
+C#
+        ↓
+YummyAnimeAdapter
+        ↓
+SyncService
+        ↓
+ViewModel
+```
+
+The website should send only small structured events.
+
+Example:
+
+```json
+{
+  "type": "bookmarkChanged",
+  "animeId": "12345"
+}
+```
+
+Do NOT send the entire page DOM.
+
+---
+
+# 23. CHANGE DETECTION
+
+Every synchronized resource should have a fingerprint/hash/version where practical.
+
+Example:
+
+```text
+Bookmarks:
+hash(bookmark IDs)
+
+History:
+hash(relevant episode IDs + watched states)
+
+Profile:
+hash(username + avatar URL)
+```
+
+If:
+
+```text
+newHash == oldHash
+```
+
+do nothing.
+
+If:
+
+```text
+newHash != oldHash
+```
+
+update the local cache and notify the UI.
+
+This prevents unnecessary UI updates.
+
+---
+
+# 24. UI UPDATE STRATEGY
+
+The UI must update incrementally.
+
+Do NOT rebuild the entire UI after synchronization.
+
+Example:
+
+```text
+Avatar changed
+→ update avatar only
+
+One bookmark changed
+→ update that bookmark
+
+One episode changed
+→ update that episode
+
+Username changed
+→ update account header
+```
+
+Use MVVM observable collections and property notifications correctly.
+
+---
+
+# 25. OFFLINE BEHAVIOR
+
+If YummyAnime cannot be reached:
+
+```text
+Application remains usable
+```
+
+Show:
+
+```text
+Offline
+Last synchronized: 18:42
+```
+
+Use cached data.
+
+Do NOT erase cached account data just because the server is temporarily unreachable.
+
+When connectivity returns:
+
+```text
+connection restored
+↓
+schedule synchronization
+```
+
+with backoff.
+
+---
+
+# 26. FAILURE HANDLING
+
+Implement:
+
+```text
+Timeout
+Connection failure
+HTTP errors
+Website structure changed
+Session expired
+Unexpected HTML
+Invalid JSON
+Rate limiting
+WebView failure
+```
+
+Never crash the application.
+
+If synchronization fails:
+
+```text
+keep previous cache
+log technical error
+retry later
+```
+
+Do not repeatedly retry immediately.
+
+Use exponential backoff:
+
+```text
+5 sec
+15 sec
+30 sec
+60 sec
+5 min
+```
+
+with a maximum limit.
+
+---
+
+# 27. SESSION EXPIRATION
+
+If YummyAnime logs the user out:
+
+Detect it.
+
+Transition:
+
+```text
+LoggedIn
+   ↓
+SessionExpired
+```
+
+Notify the UI:
+
+```text
+"Сессия YummyAnime истекла. Войдите снова."
+```
+
+Do not delete local cached data immediately.
+
+Allow the user to log in again.
+
+---
+
+# 28. MULTIPLE SITES ARCHITECTURE
+
+Do not hard-code the entire application around YummyAnime.
+
+Create:
+
+```csharp
+interface IAnimeSiteAdapter
+```
+
+Example:
+
+```csharp
+YummyAnimeAdapter
+OtherAnimeSiteAdapter
+```
+
+The interface can contain:
+
+```csharp
+Task<AuthState> GetAuthenticationStateAsync();
+
+Task<UserAccountSnapshot?> GetAccountAsync();
+
+Task<IReadOnlyList<Bookmark>> GetBookmarksAsync();
+
+Task<IReadOnlyList<WatchHistoryItem>> GetHistoryAsync();
+
+Task<WatchProgress?> GetWatchProgressAsync(
+    string animeId,
+    string episodeId);
+
+Task<bool> AddBookmarkAsync(string animeId);
+
+Task<bool> RemoveBookmarkAsync(string animeId);
+```
+
+Only implement operations that the actual site supports.
+
+---
+
+# 29. SITE ADAPTER MUST OWN SITE-SPECIFIC LOGIC
+
+This is mandatory.
+
+YummyAnime-specific:
+
+```text
+URLs
+selectors
+DOM paths
+request patterns
+JSON structures
+navigation rules
+login detection
+profile detection
+bookmark detection
+history detection
+```
+
+must exist inside:
+
+```text
+YummyAnimeAdapter
+```
+
+or its supporting classes.
+
+Do NOT place selectors inside:
+
+```text
+MainWindow
+MainViewModel
+VoiceCommandParser
+SyncService
+```
+
+---
+
+# 30. DATABASE
+
+Use SQLite for local caching.
+
+Suggested tables:
+
+```text
+Accounts
+AnimeCache
+Episodes
+BookmarksCache
+WatchHistoryCache
+WatchProgressCache
+SyncMetadata
+```
+
+Example:
+
+```text
+SyncMetadata
+----------------
+Resource
+LastSync
+ETag
+LastModified
+ContentHash
+Status
+```
+
+Do not store passwords.
+
+Do not store authentication tokens unless there is a documented, necessary, secure reason.
+
+Prefer WebView2's profile/session storage.
+
+---
+
+# 31. ETAG / LAST-MODIFIED
+
+When the actual website/API provides:
+
+```text
+ETag
+Last-Modified
+```
+
+use them.
+
+Do not redownload unchanged resources unnecessarily.
+
+If the site does not provide these mechanisms, use:
+
+```text
+TTL
+conditional page navigation where appropriate
+content hashing
+targeted synchronization
+```
+
+Do not invent HTTP caching headers.
+
+---
+
+# 32. REAL-TIME VS PERIODIC SYNC
+
+The application does NOT need to know about every remote change instantly at all times.
+
+The target is:
+
+```text
+near-real-time when relevant
+```
+
+without:
+
+```text
+constant polling
+```
+
+For example:
+
+User changes a bookmark on the website:
+
+```text
+website
+ ↓
+WebView2 event / page state
+ ↓
+application detects change
+ ↓
+local UI updates
+```
+
+If the change happens externally outside the application:
+
+```text
+another browser/device
+ ↓
+YummyAnime server
+ ↓
+application eventually refreshes when relevant
+```
+
+Use smart refresh triggers rather than 1-second polling.
+
+---
+
+# 33. OPTIONAL BACKGROUND SYNC
+
+Implement a low-frequency background synchronization mechanism only when the application is active.
+
+Example:
+
+```text
+Application visible:
+light periodic sync
+
+Application minimized:
+very low frequency or disabled
+
+Application inactive:
+no unnecessary sync
+```
+
+Do NOT run aggressive background network activity.
+
+---
+
+# 34. ACTIVE VIEW PRIORITY
+
+Synchronization priority should depend on what the user is currently viewing.
+
+Example:
+
+```text
+User viewing Bookmarks
+→ bookmarks = HIGH priority
+
+User viewing History
+→ history = HIGH priority
+
+User watching episode
+→ current episode progress = HIGH priority
+
+User on home page
+→ account = LOW priority
+→ bookmarks = LOW priority
+→ history = LOW priority
+```
+
+---
+
+# 35. PERFORMANCE REQUIREMENTS
+
+The synchronization system must NOT noticeably affect:
+
+* video playback
+* voice recognition
+* WebView2 rendering
+* UI responsiveness
+* fullscreen
+* animations
+* scrolling
+* audio
+* STT latency
+
+Never perform large parsing operations on the UI thread.
+
+WebView2 runs on an STA/UI thread, so avoid blocking that thread with expensive synchronization or parsing work.
+
+Move CPU-heavy parsing/hashing/database work to background tasks where safe.
+
+---
+
+# 36. VOICE INTEGRATION
+
+After account integration works, support commands such as:
+
+```text
+"Открой мой профиль"
+
+"Открой мои закладки"
+
+"Покажи историю"
+
+"Продолжи просмотр"
+
+"Открой последнее просмотренное"
+
+"Выйди из аккаунта"
+
+"Проверь аккаунт"
+```
+
+Voice commands must call the same services used by the UI.
+
+Do NOT create a second implementation.
+
+Example:
+
+```text
+VoiceCommand
+    ↓
+AccountService / SyncService
+    ↓
+YummyAnimeAdapter
+```
+
+---
+
+# 37. SECURITY
+
+Absolutely never log:
+
+```text
+password
+cookie
+session token
+authorization header
+refresh token
+private authentication data
+```
+
+If diagnostics need to show a request:
+
+```text
+GET /profile
+Status: 200
+Duration: 143 ms
+```
+
+not:
+
+```text
+Cookie: ...
+Authorization: ...
+```
+
+Sanitize logs.
+
+---
+
+# 38. LOGGING
+
+Create structured logs:
+
+```text
+[Auth]
+[Sync]
+[WebView]
+[Network]
+[YummyAnime]
+[Cache]
+[Performance]
+```
+
+Example:
+
+```text
+[Sync] Bookmarks synchronization started
+[Sync] Bookmarks synchronization completed: 27 items, 182 ms
+[Sync] No changes detected
+```
+
+Never log sensitive credentials or authentication secrets.
+
+---
+
+# 39. PERFORMANCE METRICS
+
+Add diagnostics:
+
+```text
+Authentication check:
+XXX ms
+
+Profile sync:
+XXX ms
+
+Bookmarks sync:
+XXX ms
+
+History sync:
+XXX ms
+
+Database update:
+XXX ms
+
+UI update:
+XXX ms
+```
+
+Track:
+
+```text
+requests/minute
+sync failures
+cache hit rate
+average sync duration
+```
+
+This is important for preventing accidental polling.
+
+---
+
+# 40. REQUEST BUDGET
+
+Implement a resource request budget.
+
+Example:
+
+```text
+Bookmarks:
+no more than 1 normal refresh per TTL window
+
+History:
+no more than 1 normal refresh per TTL window
+
+Profile:
+no more than 1 normal refresh per TTL window
+```
+
+Exceptions:
+
+```text
+user explicitly requests refresh
+login completed
+known state-changing action
+session expiration
+critical state transition
+```
+
+Even then, debounce duplicate refresh requests.
+
+---
+
+# 41. MANUAL REFRESH
+
+Add:
+
+```text
+Refresh account
+Refresh bookmarks
+Refresh history
+Refresh everything
+```
+
+Manual refresh bypasses normal TTL but still uses:
+
+```text
+deduplication
+cancellation
+rate-limit protection
+```
+
+---
+
+# 42. CANCELLATION
+
+If the user navigates away before a low-priority sync finishes:
+
+```text
+cancel unnecessary operation
+```
+
+Example:
+
+```text
+User opens bookmarks
+↓
+bookmark sync starts
+↓
+user immediately starts another anime
+↓
+cancel obsolete UI-only refresh if safe
+```
+
+Do not cancel a state-changing operation that must complete.
+
+---
+
+# 43. IMPORTANT DISTINCTION
+
+There are three kinds of operations:
+
+### READ
+
+```text
+Get profile
+Get bookmarks
+Get history
+```
+
+Can be cached and cancelled.
+
+### STATE-CHANGING
+
+```text
+Add bookmark
+Remove bookmark
+Mark watched
+Update progress
+Logout
+```
+
+Must be handled carefully and verified.
+
+### PLAYBACK
+
+```text
+Play
+Pause
+Seek
+Next episode
+```
+
+Must remain extremely low latency and must not wait for account synchronization.
+
+---
+
+# 44. WATCH PROGRESS
+
+Do not send a server request every video frame.
+
+Absolutely NOT:
+
+```text
+every 16 ms
+→ upload progress
+```
+
+Instead use checkpoints.
+
+Example:
+
+```text
+5–10 seconds after meaningful progress
+or
+every 15–30 seconds
+or
+when progress changes significantly
+or
+when paused
+or
+when episode ends
+or
+when navigating away
+```
+
+But first inspect how YummyAnime itself stores progress.
+
+If the website already performs its own progress saving, prefer observing/verifying the site's behavior rather than implementing a duplicate upload mechanism.
+
+---
+
+# 45. WEBSITE UPDATE COMPATIBILITY
+
+The site WILL eventually change.
+
+Therefore create a diagnostic system.
+
+If a selector stops working:
+
+```text
+YummyAnimeAdapter
+↓
+selector not found
+↓
+diagnostic warning
+↓
+do not crash
+```
+
+Log:
+
+```text
+Expected profile element not found
+Current URL: ...
+Adapter version: ...
+```
+
+Do not dump the entire page or sensitive information into logs.
+
+---
+
+# 46. ADAPTER VERSION
+
+Create:
+
+```text
+YummyAnimeAdapterVersion
+```
+
+Example:
+
+```text
+1.0.0
+```
+
+When the site structure changes, the adapter can be updated independently from the core application architecture.
+
+---
+
+# 47. TESTING
+
+Create unit tests for:
+
+```text
+authentication state detection
+cache expiration
+TTL
+deduplication
+debounce
+throttle
+hash comparison
+bookmark synchronization
+history synchronization
+session expiration
+offline mode
+retry/backoff
+cancellation
+```
+
+Create integration tests using a mock site adapter.
+
+Example:
+
+```text
+MockYummyAnimeAdapter
+```
+
+Do NOT make unit tests depend on the live website.
+
+Live-site testing should be separate.
+
+---
+
+# 48. LIVE SITE DIAGNOSTIC MODE
+
+Create an optional:
+
+```text
+Developer / Diagnostics
+```
+
+screen.
+
+Display:
+
+```text
+Site:
+YummyAnime
+
+Authentication:
+Logged in
+
+Profile:
+OK
+
+Bookmarks:
+OK
+
+History:
+OK
+
+Last sync:
+18:43:12
+
+Last sync duration:
+183 ms
+
+Network requests:
+X
+
+Cache hits:
+X
+
+Errors:
+0
+```
+
+Do not expose sensitive data.
+
+---
+
+# 49. DO NOT BREAK EXISTING FEATURES
+
+Before modifying the application, inspect the current architecture.
+
+Do not rewrite the entire application.
+
+Integrate with:
+
+```text
+existing WebView2
+existing voice system
+existing playback system
+existing watch history
+existing tabs
+existing settings
+existing logging
+```
+
+Reuse existing services where possible.
+
+If existing services conflict with this architecture, refactor minimally and safely.
+
+---
+
+# 50. FULL DATA FLOW
+
+The desired final architecture is:
+
+```text
+                    YUMMYANIME SERVER
+                           │
+                           │ HTTPS
+                           ▼
+                    REAL YUMMYANIME
+                           │
+                    WebView2 session
+                           │
+                           ▼
+                    WebView2 Browser
+                           │
+             ┌─────────────┴──────────────┐
+             │                            │
+             ▼                            ▼
+       Site Adapter                 Page Events
+             │                            │
+             └─────────────┬──────────────┘
+                           ▼
+                  YummyAnimeSyncService
+                           │
+                  ┌────────┴────────┐
+                  ▼                 ▼
+             Remote State       SQLite Cache
+                  │                 │
+                  └────────┬────────┘
+                           ▼
+                       ViewModels
+                           │
+                           ▼
+                           UI
+```
+
+---
+
+# 51. AUTHENTICATION FLOW
+
+Implement exactly this conceptual flow:
+
+```text
+Application starts
+        ↓
+Load persistent WebView2 profile
+        ↓
+Open YummyAnime
+        ↓
+Check visible authenticated state
+        ↓
+       ┌───────────────┐
+       │               │
+    Logged in       Logged out
+       │               │
+       ▼               ▼
+Sync account       Show login
+       │               │
+       │          User logs in
+       │               │
+       └───────┬───────┘
+               ▼
+        Full initial sync
+               ▼
+        Application ready
+```
+
+---
+
+# 52. IMPORTANT WEBVIEW2 RULE
+
+Do not build an authentication system around extracting cookies/tokens from WebView2.
+
+Use the persistent browser profile for the normal website session.
+
+Microsoft explicitly documents persistent WebView2 profile data for maintaining sign-in across launches, while warning against scraping authentication tokens from redirects/navigation/cookies for OAuth-style flows.
+
+If YummyAnime uses a special external OAuth provider rather than ordinary site login, inspect that flow first and implement the provider's supported desktop authentication mechanism instead of scraping tokens.
+
+---
+
+# 53. FINAL ACCEPTANCE TEST
+
+The implementation is complete only when this scenario works:
+
+### Test 1
+
+Install application.
+
+Launch.
+
+YummyAnime opens.
+
+---
+
+### Test 2
+
+Click:
+
+```text
+Login
+```
+
+Real YummyAnime login page appears.
+
+User logs in normally.
+
+---
+
+### Test 3
+
+Application detects:
+
+```text
+Logged in
+```
+
+and displays:
+
+```text
+username
+avatar
+```
+
+---
+
+### Test 4
+
+Open bookmarks.
+
+Application displays the user's real YummyAnime bookmarks.
+
+---
+
+### Test 5
+
+Add/remove a bookmark on YummyAnime.
+
+Application updates the corresponding item without full application reload.
+
+---
+
+### Test 6
+
+Open history.
+
+Application displays real remote watch history.
+
+---
+
+### Test 7
+
+Watch an episode.
+
+Progress changes.
+
+Application synchronizes the appropriate remote state without sending requests every frame.
+
+---
+
+### Test 8
+
+Close application.
+
+Restart.
+
+The user remains logged in if the website session is still valid.
+
+---
+
+### Test 9
+
+Change something on YummyAnime externally.
+
+Return to the application.
+
+When a relevant synchronization trigger occurs, the application detects the change and updates the UI.
+
+---
+
+### Test 10
+
+Disconnect internet.
+
+Application does not crash.
+
+Cached data remains available.
+
+---
+
+### Test 11
+
+Reconnect internet.
+
+Application performs controlled synchronization.
+
+No request storm occurs.
+
+---
+
+### Test 12
+
+Use voice:
+
+```text
+"Открой мои закладки"
+```
+
+The same synchronization/account services are used.
+
+---
+
+# 54. PERFORMANCE ACCEPTANCE CRITERIA
+
+The implementation must satisfy:
+
+```text
+No 1-second full-site polling
+No DOM serialization every second
+No entire-history reload after every action
+No entire-account refresh after every bookmark change
+No network requests on every video frame
+No UI-thread blocking synchronization
+No duplicate simultaneous sync operations
+No unnecessary image downloads
+No password/token/cookie logging
+```
+
+The system should be:
+
+```text
+event-driven
+cache-aware
+TTL-aware
+debounced
+throttled
+cancelable
+asynchronous
+incremental
+remote-authoritative
+```
+
+---
+
+# 55. IMPLEMENTATION ORDER
+
+Do NOT implement everything simultaneously.
+
+Follow this order:
+
+### Phase 1
+
+Inspect the existing codebase.
+
+Identify:
+
+* WebView2 service
+* navigation service
+* player service
+* history service
+* database
+* MVVM structure
+* settings
+* logging
+
+Report existing relevant classes before changing them.
+
+### Phase 2
+
+Inspect real YummyAnime.
+
+Document actual:
+
+* login flow
+* profile
+* avatar
+* bookmarks
+* history
+* watch progress
+* navigation
+* network behavior
+
+Do not guess.
+
+### Phase 3
+
+Implement:
+
+```text
+YummyAnimeAdapter
+AuthenticationService
+```
+
+### Phase 4
+
+Implement persistent WebView2 profile.
+
+### Phase 5
+
+Implement:
+
+```text
+YummyAnimeSyncService
+SQLite cache
+SyncMetadata
+```
+
+### Phase 6
+
+Implement targeted synchronization.
+
+### Phase 7
+
+Implement event/debounce/throttle system.
+
+### Phase 8
+
+Integrate account data into UI.
+
+### Phase 9
+
+Integrate voice commands.
+
+### Phase 10
+
+Run regression tests.
+
+### Phase 11
+
+Measure performance.
+
+### Phase 12
+
+Build release EXE/installer.
+
+---
+
+# 56. FINAL REQUIREMENT
+
+Do not tell me that something works merely because the code compiles.
+
+For every major integration point verify actual behavior.
+
+Especially verify:
+
+```text
+real login
+persistent session
+real account information
+real avatar
+real bookmarks
+real watch history
+real watch progress
+remote change detection
+targeted synchronization
+offline cache
+session expiration
+performance
+```
+
+If YummyAnime does not expose a particular piece of information through the currently accessible website, clearly report:
+
+```text
+NOT AVAILABLE THROUGH CURRENT SITE INTERFACE
+```
+
+Do not fabricate an API or pretend the feature works.
+
+At the end provide a concise implementation report:
+
+```text
+Implemented:
+- ...
+- ...
+- ...
+
+Verified against real YummyAnime:
+- ...
+- ...
+
+Not available / blocked by site:
+- ...
+
+Synchronization strategy:
+- ...
+
+Average sync timings:
+- ...
+
+Requests generated during normal use:
+- ...
+
+Performance issues found:
+- ...
+
+Files/classes changed:
+- ...
+```

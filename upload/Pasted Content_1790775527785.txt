@@ -1,0 +1,2367 @@
+IMPLEMENTATION TASK: PERSISTENT WATCH HISTORY AND EPISODE PROGRESS
+
+You are working on an existing Windows desktop anime voice-control application built with:
+- C# / .NET 8
+- WPF
+- MVVM
+- WebView2
+- YummyAnime website integration
+- Voice recognition
+- Command parser
+- Tab management
+- Player control
+
+DO NOT rewrite the application from scratch.
+DO NOT remove existing functionality.
+DO NOT replace working architecture unnecessarily.
+
+The goal of this task is to implement a robust persistent WATCH HISTORY system.
+
+==================================================
+1. CORE REQUIREMENT
+==================================================
+
+The application must remember what anime and episodes the user has watched.
+
+The history must survive:
+- application restart
+- computer restart
+- WebView2 restart
+- switching tabs
+- closing and reopening an anime
+- changing the selected website
+
+Example:
+
+User watches:
+
+Anime:
+"One Piece"
+
+Episode:
+6
+
+The application must remember:
+
+One Piece -> episode 6
+
+If the user later says:
+
+"Продолжи One Piece"
+
+the application should be able to continue from the appropriate episode.
+
+==================================================
+2. WATCH PROGRESS DATA
+==================================================
+
+Create a persistent local data model similar to:
+
+WatchHistoryEntry
+
+Fields should include:
+
+- SiteId
+- AnimeId
+- AnimeTitle
+- EpisodeNumber
+- EpisodeId if available
+- EpisodeTitle if available
+- LastPositionSeconds
+- DurationSeconds
+- WatchedPercent
+- LastWatchedAt
+- Completed
+- LastSelectedVoiceProvider
+- LastSelectedQuality
+- LastKnownUrl
+
+Do not depend only on the anime title.
+
+Prefer a stable website anime ID when the website exposes one.
+
+If no stable ID exists, create a deterministic fallback identifier.
+
+==================================================
+3. WHEN TO SAVE PROGRESS
+==================================================
+
+Do not save only when the user closes the application.
+
+Save progress during playback.
+
+Use throttled updates.
+
+For example:
+- periodically every several seconds
+- when episode changes
+- when playback pauses
+- when playback ends
+- when application closes
+- when WebView2 navigation changes
+
+Avoid excessive disk writes.
+
+Use an in-memory state and periodically persist changes.
+
+==================================================
+4. COMPLETED EPISODES
+==================================================
+
+An episode should be considered completed when:
+
+- HTML5 video fires the `ended` event
+
+OR
+
+- playback position reaches an appropriate threshold near the end
+
+Use a configurable completion threshold if necessary.
+
+For example:
+
+completed when:
+
+currentTime / duration >= 0.90
+
+But prefer the actual `ended` event whenever possible.
+
+==================================================
+5. "CONTINUE WATCHING"
+==================================================
+
+Implement commands:
+
+"Продолжи аниме One Piece"
+"Продолжи One Piece"
+"Продолжи смотреть One Piece"
+"Продолжить просмотр"
+
+The application should determine:
+
+- last watched anime
+- last watched episode
+- current playback position
+
+If the last episode is incomplete:
+
+Resume from the saved position.
+
+If the last episode is completed:
+
+Open the next episode if available.
+
+Example:
+
+Episode 5:
+95% watched -> completed
+
+User says:
+"Продолжи One Piece"
+
+Open episode 6.
+
+If episode 5:
+40% watched
+
+Open episode 5 and resume around 40%.
+
+==================================================
+6. VOICE COMMANDS
+==================================================
+
+Support commands such as:
+
+"Какая серия последняя просмотренная?"
+"На какой серии я остановился?"
+"Продолжи просмотр"
+"Продолжи One Piece"
+"Открой мою историю"
+"Покажи историю"
+"Очисти историю"
+
+Also support:
+
+"Начни с первой серии"
+
+"Продолжи с шестой серии"
+
+==================================================
+7. MULTIPLE TABS
+==================================================
+
+Watch history must not break when multiple tabs are open.
+
+Each tab should maintain:
+
+- current anime
+- current episode
+- current playback position
+- selected provider
+- selected quality
+
+The global history database should remain independent from the tab UI state.
+
+==================================================
+8. DATABASE / STORAGE
+==================================================
+
+Use a robust local persistence mechanism.
+
+SQLite is preferred.
+
+Possible structure:
+
+WatchHistory
+Anime
+Episodes
+PlaybackState
+
+Do not store unnecessary duplicate data.
+
+Use migrations/versioning so future versions of the application can change the database safely.
+
+==================================================
+9. ACCOUNT AWARENESS
+==================================================
+
+Prepare the architecture for future account synchronization.
+
+For now local storage is acceptable.
+
+However, design the data model so it can later support:
+
+UserAccountId
+
+This allows:
+
+Account A:
+history A
+
+Account B:
+history B
+
+Do not implement fake cloud synchronization.
+
+==================================================
+10. UI
+==================================================
+
+Add a Watch History section.
+
+Display:
+
+Anime title
+Last episode
+Progress
+Last watched time
+
+Example:
+
+One Piece
+Episode 6
+42%
+Last watched: Today
+
+Allow:
+
+Resume
+Open episode
+Remove from history
+
+==================================================
+11. TESTING
+==================================================
+
+Create tests for:
+
+1. Start episode
+2. Save playback progress
+3. Pause
+4. Resume
+5. Complete episode
+6. Close application
+7. Restart application
+8. Reopen anime
+9. Continue command
+10. Multiple tabs
+11. Multiple anime
+12. Missing episode
+13. Deleted anime
+14. Website navigation
+15. WebView2 restart
+
+IMPORTANT:
+
+Do not use arbitrary delays as a substitute for state detection.
+
+Use real player events and verified state.
+
+After implementation, explain:
+- files changed
+- new services
+- data model
+- database schema
+- commands added
+- tests performed
+- any remaining limitations
+
+
+IMPLEMENTATION TASK: CREATE A PRODUCTION-READY WINDOWS EXE BUILD
+
+The existing application must be packaged as a real Windows desktop application that the user can download and run.
+
+Technology:
+- C#
+- .NET 8
+- WPF
+- WebView2
+- Windows 10/11
+
+DO NOT rewrite the application.
+
+==================================================
+1. PRIMARY GOAL
+==================================================
+
+Create a production-ready build that produces:
+
+AnimeController.exe
+
+The user must be able to download the application, install/run it, and use it without opening Visual Studio.
+
+==================================================
+2. PUBLISH CONFIGURATION
+==================================================
+
+Create proper Release publishing configuration.
+
+Target:
+
+Windows 10/11 x64.
+
+Prefer:
+
+self-contained deployment
+
+so the user does not need to manually install the .NET runtime.
+
+Configure:
+
+- Release
+- win-x64
+- self-contained
+- publish single-file if compatible
+- ReadyToRun if it does not break WebView2
+- trimming DISABLED unless proven safe
+
+Do NOT aggressively trim WPF/WebView2 assemblies.
+
+==================================================
+3. WEBVIEW2
+==================================================
+
+The application requires Microsoft Edge WebView2 Runtime.
+
+Detect whether WebView2 Runtime is available.
+
+If missing:
+
+show a clear installation message.
+
+Do not silently crash.
+
+Provide a clear way for the user to install the required runtime.
+
+==================================================
+4. DATA DIRECTORIES
+==================================================
+
+Use proper Windows directories.
+
+Application data:
+
+%LOCALAPPDATA%\\AnimeController
+
+Include separate directories for:
+
+- WebView2 profile
+- database
+- logs
+- settings
+- cache
+
+Do not write user data next to the EXE if the application is installed into Program Files.
+
+==================================================
+5. INSTALLER
+==================================================
+
+Create an installer if practical.
+
+Possible structure:
+
+AnimeController-Setup.exe
+
+Installer should:
+
+- install application
+- create Start Menu shortcut
+- optionally create Desktop shortcut
+- uninstall correctly
+- preserve user data when uninstalling unless user explicitly chooses to remove it
+
+==================================================
+6. CONFIGURATION
+==================================================
+
+Do not hardcode development paths.
+
+Remove:
+
+- absolute developer paths
+- local Python paths
+- debug-only URLs
+- developer machine directories
+
+Use configuration files and environment-aware paths.
+
+==================================================
+7. LOGGING
+==================================================
+
+Release build must have safe logging.
+
+Never log:
+
+- passwords
+- authentication tokens
+- cookies
+- session IDs
+- Authorization headers
+
+Logs should contain useful technical information for debugging.
+
+==================================================
+8. VERSIONING
+==================================================
+
+Create application versioning.
+
+Example:
+
+1.0.0
+
+Update:
+
+AssemblyVersion
+FileVersion
+ProductVersion
+
+Display version in:
+
+Settings -> About
+
+==================================================
+9. PUBLISH SCRIPT
+==================================================
+
+Create a simple build script:
+
+build-release.ps1
+
+It should:
+
+1. clean
+2. restore
+3. build
+4. publish
+5. create release directory
+
+Example output:
+
+Release/
+    AnimeController.exe
+    installer/
+    checksums/
+    README.txt
+
+==================================================
+10. TEST THE FINAL BUILD
+==================================================
+
+Do not only test Debug.
+
+Test the actual Release executable.
+
+Test:
+
+- startup
+- WebView2
+- website loading
+- voice recognition
+- microphone
+- player control
+- fullscreen
+- account login
+- watch history
+- settings
+- database
+- multiple tabs
+- application restart
+
+The final EXE must work on a clean Windows environment as much as possible.
+
+==================================================
+11. DELIVERABLE
+==================================================
+
+At the end provide:
+
+- Release EXE
+- installer if implemented
+- build script
+- publish profile
+- version information
+- installation instructions
+
+Do not claim the build works until the Release executable has actually been tested.
+
+
+
+IMPLEMENTATION TASK: ADVANCED MULTI-STEP VOICE COMMAND SYSTEM
+
+Upgrade the existing voice command system so that users can combine multiple actions into one natural Russian voice command.
+
+DO NOT require the user to issue separate commands.
+
+Examples:
+
+"Запусти 6 серию"
+
+"Включи One Piece 6 серию"
+
+"Включи One Piece серия 6"
+
+"Открой One Piece шестую серию"
+
+"Включи One Piece, серия двадцать"
+
+"Запусти Наруто 15 серию"
+
+"Открой Берсерк, третью серию"
+
+==================================================
+1. COMMAND PIPELINE
+==================================================
+
+Create a proper pipeline:
+
+Microphone
+    ↓
+VAD
+    ↓
+Speech Recognition
+    ↓
+Text Normalization
+    ↓
+Intent Detection
+    ↓
+Entity Extraction
+    ↓
+Command Validation
+    ↓
+Command Execution
+    ↓
+State Verification
+
+Do not directly execute raw Whisper text.
+
+==================================================
+2. COMMAND MODEL
+==================================================
+
+Create structured commands.
+
+Example:
+
+PlayAnimeEpisodeCommand
+
+Properties:
+
+AnimeTitle
+EpisodeNumber
+Site
+Provider
+Quality
+Autoplay
+ResumePosition
+
+All properties should be optional when the command does not contain them.
+
+Example:
+
+"Включи One Piece шестую серию"
+
+becomes:
+
+Intent = PlayEpisode
+
+AnimeTitle = One Piece
+
+EpisodeNumber = 6
+
+==================================================
+3. RUSSIAN NUMBER PARSER
+==================================================
+
+Support:
+
+1
+2
+3
+10
+20
+100
+
+and Russian words:
+
+первую
+вторую
+третью
+четвертую
+пятую
+шестую
+седьмую
+восьмую
+девятую
+десятую
+
+Also:
+
+пятнадцатую
+двадцатую
+двадцать первую
+сто двадцатую
+
+Normalize all of them into integers.
+
+==================================================
+4. CONTEXTUAL COMMANDS
+==================================================
+
+If the user says:
+
+"Запусти шестую серию"
+
+and the current anime is One Piece:
+
+execute:
+
+One Piece -> Episode 6
+
+If no anime context exists:
+
+ask:
+
+"Какое аниме открыть?"
+
+Do not guess randomly.
+
+==================================================
+5. MULTIPLE PARAMETERS
+==================================================
+
+Support combinations such as:
+
+"Включи One Piece шестую серию в 1080"
+
+Result:
+
+Anime = One Piece
+Episode = 6
+Quality = 1080p
+
+Also:
+
+"Включи One Piece шестую серию с AniLibria"
+
+Result:
+
+Anime = One Piece
+Episode = 6
+Provider = AniLibria
+
+Also:
+
+"Включи One Piece шестую серию в 1080 с AniLibria"
+
+==================================================
+6. SEARCH + PLAY
+==================================================
+
+If the anime is not currently open:
+
+1. Search anime
+2. Identify correct anime
+3. Open anime page
+4. Find requested episode
+5. Open episode
+6. Select provider if requested
+7. Select quality if requested
+8. Start playback
+9. Verify playback
+
+This should be treated as ONE logical command.
+
+==================================================
+7. AMBIGUOUS RESULTS
+==================================================
+
+If search returns multiple anime with similar titles:
+
+Do not automatically select an arbitrary result.
+
+Ask the user:
+
+"Нашёл несколько вариантов. Какой открыть?"
+
+Then provide numbered choices.
+
+The user can say:
+
+"Второй"
+
+and the command system selects result #2.
+
+==================================================
+8. COMMAND COMBINATIONS
+==================================================
+
+Support:
+
+"Открой"
+"Запусти"
+"Включи"
+"Начни"
+"Поставь"
+
+as aliases for opening/playing.
+
+Support:
+
+"серия"
+"эпизод"
+
+as aliases.
+
+==================================================
+9. NATURAL LANGUAGE
+==================================================
+
+The parser should tolerate:
+
+"Включи ван пис шестую серию"
+
+"Запусти One Piece, 6 серия"
+
+"Открой шестую серию One Piece"
+
+"Поставь мне One Piece на шестую"
+
+"Давай шестую серию One Piece"
+
+These should resolve to the same structured command.
+
+==================================================
+10. COMMAND CONFIRMATION
+==================================================
+
+Do not ask for confirmation for unambiguous commands.
+
+For example:
+
+"Включи One Piece 6 серию"
+
+should execute immediately.
+
+Only ask when important information is genuinely ambiguous.
+
+==================================================
+11. TEST SUITE
+==================================================
+
+Create automated tests for at least 50 Russian command variations.
+
+Include:
+
+- titles
+- episode numbers
+- word numbers
+- mixed numbers
+- provider
+- quality
+- current context
+- missing context
+- ambiguous anime
+- invalid episode
+
+==================================================
+12. PERFORMANCE
+==================================================
+
+The command parser must be fast.
+
+Do not use an LLM for simple command parsing if deterministic parsing is enough.
+
+Prefer:
+
+normalization
++
+intent classification
++
+regex/rule extraction
++
+fuzzy matching
+
+Use an LLM only as an optional fallback if the architecture already supports it.
+
+==================================================
+13. IMPORTANT
+==================================================
+
+Every command must return a structured result such as:
+
+Success
+Failed
+NeedClarification
+NotFound
+PlayerUnavailable
+EpisodeUnavailable
+
+Do not hide errors.
+
+Log technical diagnostics without logging private credentials.
+
+
+BUG FIX TASK: FIX UNMUTE / MUTE / VOLUME CONTROL
+
+The current voice command for unmute does not work reliably.
+
+Fix the underlying implementation instead of adding arbitrary delays.
+
+==================================================
+1. REQUIRED COMMANDS
+==================================================
+
+Support:
+
+"Включи звук"
+"Убери беззвучный режим"
+"Размути"
+"Размуть"
+"Выключи звук"
+"Заглуши"
+"Поставь громкость 50"
+"Сделай громче"
+"Сделай тише"
+
+==================================================
+2. PLAYER STATE
+==================================================
+
+Read the actual HTML5 video state:
+
+HTMLMediaElement.muted
+HTMLMediaElement.volume
+
+Do not rely only on UI button text.
+
+==================================================
+3. UNMUTE
+==================================================
+
+Implement:
+
+video.muted = false
+
+Then verify:
+
+video.muted === false
+
+If the website uses its own custom player state, synchronize both:
+
+HTML5 video state
++
+site player state
+
+==================================================
+4. MUTE
+==================================================
+
+Implement:
+
+video.muted = true
+
+Verify the state after changing it.
+
+==================================================
+5. VOLUME
+==================================================
+
+Normalize voice values:
+
+0 -> 0.0
+25 -> 0.25
+50 -> 0.50
+75 -> 0.75
+100 -> 1.0
+
+Clamp:
+
+0.0 <= volume <= 1.0
+
+==================================================
+6. PLAYER RECREATION
+==================================================
+
+IMPORTANT:
+
+The website may destroy and recreate the video element.
+
+Do not keep a permanently cached HTMLVideoElement reference.
+
+Create a PlayerElementResolver.
+
+It should rediscover the current active video element when necessary.
+
+Use MutationObserver where appropriate.
+
+==================================================
+7. STATE VERIFICATION
+==================================================
+
+Every player command should follow:
+
+Find player
+↓
+Execute
+↓
+Read actual state
+↓
+Verify
+↓
+Return success/failure
+
+Example:
+
+Unmute()
+
+Find video
+Set muted=false
+Read muted
+If false -> success
+If true -> retry through player UI/API
+If still true -> report failure
+
+==================================================
+8. FALLBACKS
+==================================================
+
+Use:
+
+1. HTML5 video API
+2. site player API if available
+3. player UI button
+4. keyboard shortcut if documented
+5. coordinate automation ONLY as last resort
+
+Do not make coordinate clicking the primary solution.
+
+==================================================
+9. TESTS
+
+Test:
+
+- muted -> unmuted
+- unmuted -> muted
+- volume 0
+- volume 25
+- volume 50
+- volume 100
+- player reload
+- episode change
+- fullscreen
+- WebView2 navigation
+- voice commands during playback
+
+Find the actual reason why unmute currently fails and fix it.
+Do not simply add a 1-2 second delay.
+
+
+MAJOR ARCHITECTURE TASK: LOW-LATENCY VOICE COMMAND SYSTEM WITHOUT FALSE COMMANDS OR COOLDOWN PROBLEMS
+
+The current voice system has a serious UX problem:
+
+The user says something.
+
+The application reacts immediately.
+
+Sometimes the user was NOT giving a command.
+
+Then the user repeats the actual command, but the application is still inside a cooldown period, so the second command is ignored.
+
+This must be redesigned.
+
+DO NOT simply reduce the cooldown.
+
+The system needs intelligent command validation, debouncing and command lifecycle management.
+
+==================================================
+1. PRIMARY GOAL
+==================================================
+
+The voice system should feel:
+
+- immediate
+- responsive
+- natural
+- low latency
+- resistant to accidental speech
+- able to accept a command immediately after an incorrect recognition
+- able to handle repeated commands
+
+There should NOT be a long global cooldown.
+
+==================================================
+2. CURRENT BAD DESIGN
+
+Avoid:
+
+Listen
+↓
+Recognize
+↓
+Execute
+↓
+Ignore everything for 3-5 seconds
+
+This is unacceptable.
+
+==================================================
+3. NEW ARCHITECTURE
+
+Implement:
+
+Microphone
+↓
+VAD
+↓
+Speech Segment
+↓
+STT
+↓
+Text Normalization
+↓
+Command Candidate
+↓
+Confidence / Intent Validation
+↓
+Deduplication
+↓
+Command Queue
+↓
+Execution
+↓
+Verification
+
+==================================================
+4. COMMAND DETECTION
+
+Do not treat every recognized sentence as a command.
+
+Examples:
+
+User says:
+
+"Так, я сейчас думаю, что..."
+
+This should NOT execute anything.
+
+User says:
+
+"Включи шестую серию"
+
+This is a command.
+
+Create a command confidence system.
+
+For example:
+
+High confidence:
+"Включи"
+"Открой"
+"Следующая серия"
+"Пауза"
+"Громкость 50"
+
+Low confidence:
+random conversation
+incomplete phrase
+background TV speech
+music lyrics
+partial sentence
+
+Low-confidence text should be ignored.
+
+==================================================
+5. COMMAND PREFIXES
+
+Support explicit command prefixes:
+
+"Компьютер"
+"Система"
+"Аниме"
+
+Optional wake word mode.
+
+Example:
+
+"Компьютер, включи шестую серию"
+
+But also allow direct commands when the user chooses always-listening mode:
+
+"Следующая серия"
+
+==================================================
+6. NO GLOBAL COOLDOWN
+
+Remove the large global cooldown.
+
+Instead implement:
+
+CommandDeduplicator
+
+It should prevent the EXACT SAME command from being executed repeatedly due to duplicated STT results.
+
+Example:
+
+"Пауза"
+"Пауза"
+
+within 300 ms:
+
+execute only once.
+
+But:
+
+"Пауза"
+then after 800 ms:
+
+"Продолжи"
+
+must execute immediately.
+
+==================================================
+7. COMMAND STATES
+
+Implement:
+
+Detected
+Validated
+Queued
+Executing
+Completed
+Failed
+Cancelled
+
+A new valid command must be able to interrupt a previous command when appropriate.
+
+Example:
+
+"Открой One Piece"
+
+Immediately followed by:
+
+"Нет, открой Naruto"
+
+The second command should be able to cancel the first navigation if it has not completed.
+
+==================================================
+8. COMMAND PRIORITIES
+
+Implement priorities.
+
+High priority:
+
+Stop
+Pause
+Play
+Mute
+Unmute
+Next
+Previous
+
+Medium priority:
+
+Open anime
+Open episode
+Search
+
+Low priority:
+
+Information
+History
+Statistics
+
+A high-priority command should be executable even if another low-priority operation is running.
+
+==================================================
+9. STT PARTIAL RESULTS
+
+If the STT engine supports partial results:
+
+DO NOT execute commands from partial results.
+
+Example:
+
+"Включи..."
+then:
+
+"Включи шестую..."
+then:
+
+"Включи шестую серию"
+
+Only execute the final stable result.
+
+==================================================
+10. VAD
+
+Improve speech segmentation.
+
+The application should wait only until the user finishes the current utterance.
+
+Do not introduce an artificial 2-5 second delay.
+
+Use:
+
+- voice activity
+- silence duration
+- minimum speech duration
+- maximum segment duration
+
+Tune these parameters through configuration.
+
+==================================================
+11. FAST COMMANDS
+
+Simple commands should be executed with minimal latency.
+
+Examples:
+
+"Пауза"
+"Продолжи"
+"Следующая"
+"Громче"
+"Тише"
+"Включи звук"
+
+These should not require unnecessary website searches.
+
+==================================================
+12. COMPLEX COMMANDS
+
+Complex commands may take longer:
+
+"Включи One Piece шестую серию в 1080p"
+
+The application should parse the entire command first.
+
+Do not execute:
+
+"Включи One Piece"
+
+and then separately:
+
+"6 серия"
+
+unless this is explicitly intended.
+
+==================================================
+13. INTERRUPT SUPPORT
+
+Implement:
+
+CancelCurrentCommand()
+
+Example:
+
+"Открой Naruto"
+
+while loading:
+
+"Стоп"
+
+should cancel the current command when possible.
+
+==================================================
+14. FALSE POSITIVE PROTECTION
+
+Use multiple signals:
+
+- VAD
+- command keywords
+- intent confidence
+- known command vocabulary
+- current UI state
+- STT confidence if available
+
+Do not require 100% confidence.
+
+Use configurable thresholds.
+
+==================================================
+15. CONFIGURATION
+
+Expose settings:
+
+SpeechEndSilenceMs
+MinimumSpeechDurationMs
+CommandConfidenceThreshold
+DuplicateCommandWindowMs
+MaxCommandDurationMs
+
+Default values should be tuned for responsive Russian speech.
+
+==================================================
+16. LOGGING
+
+Add diagnostics:
+
+STT text
+STT latency
+command detection latency
+command execution latency
+confidence
+reason command was rejected
+reason command was deduplicated
+
+NEVER log sensitive account credentials.
+
+==================================================
+17. TEST SCENARIOS
+
+Test:
+
+1. User says random sentence
+2. User says valid command
+3. User repeats command
+4. User corrects command
+5. User says two different commands quickly
+6. Background TV speech
+7. Music
+8. Partial STT result
+9. Long sentence
+10. Very short command
+11. Command during fullscreen
+12. Command during loading
+13. Command during episode transition
+14. Command after false positive
+15. Command immediately after another command
+
+The system must remain responsive.
+
+IMPORTANT:
+
+Do not solve this problem by simply changing cooldown from 5 seconds to 1 second.
+
+The real solution is event-driven voice recognition + command validation + deduplication + interruptible command execution.
+
+
+
+IMPLEMENTATION TASK: VOICE-CONTROLLED VIDEO QUALITY SELECTION
+
+Add complete voice-controlled video quality selection.
+
+Supported target qualities:
+
+360p
+480p
+720p
+1080p
+1440p / 2K
+2160p / 4K
+
+The user should be able to say:
+
+"Поставь 360"
+"Поставь 480"
+"Поставь 720"
+"Поставь 1080"
+"Поставь 1440"
+"Поставь 4К"
+
+Also:
+
+"Поставь максимальное качество"
+
+==================================================
+1. IMPORTANT WEBSITE COMPATIBILITY
+
+Do NOT assume that every anime/video has every quality.
+
+The application must inspect the currently available quality options on the actual player.
+
+Example:
+
+Available:
+
+360p
+480p
+720p
+1080p
+
+If user requests:
+
+4K
+
+and 4K is unavailable:
+
+Do not fail silently.
+
+Say:
+
+"4K недоступно. Максимальное доступное качество — 1080p."
+
+==================================================
+2. DYNAMIC QUALITY DISCOVERY
+
+Create:
+
+PlayerQualityService
+
+It should inspect:
+
+- player settings
+- quality menu
+- HTML/video player configuration
+- available source options
+
+Do not hardcode DOM selectors unless isolated inside YummyAnimeAdapter.
+
+==================================================
+3. NORMALIZATION
+
+Normalize:
+
+"триста шестьдесят"
+"360"
+"360p"
+
+into:
+
+360
+
+Normalize:
+
+"тысяча восемьдесят"
+"1080"
+"1080p"
+"фулл HD"
+
+into:
+
+1080
+
+Normalize:
+
+"четыре ка"
+"4K"
+"2160"
+"2160p"
+
+into:
+
+2160
+
+==================================================
+4. MAXIMUM QUALITY
+
+Support:
+
+"Максимальное качество"
+"Поставь самое высокое"
+"Лучшее доступное качество"
+"Максимум"
+
+The application should inspect all available options and select the highest available quality.
+
+Do not simply assume 4K.
+
+==================================================
+5. QUALITY VERIFICATION
+
+After selecting quality:
+
+1. select option
+2. wait for actual player/source change
+3. inspect current quality
+4. verify
+
+Return:
+
+Requested: 1080p
+Actual: 1080p
+Status: Success
+
+==================================================
+6. QUALITY PERSISTENCE
+
+Remember the user's preferred quality.
+
+For example:
+
+PreferredQuality = 1080p
+
+When opening a new episode:
+
+try to select 1080p.
+
+If unavailable:
+
+select the highest available quality below it.
+
+Do not select a lower quality if the requested quality exists.
+
+==================================================
+7. MULTIPLE TABS
+
+Quality preference should be configurable:
+
+Global preference
++
+per-tab current quality
+
+Do not accidentally change quality in another tab.
+
+==================================================
+8. VOICE COMMANDS
+
+Support:
+
+"Поставь 720"
+"Поставь 1080"
+"Поставь Full HD"
+"Поставь 4K"
+"Максимальное качество"
+"Поставь самое высокое качество"
+
+==================================================
+9. TESTING
+
+Test:
+
+360
+480
+720
+1080
+1440
+2160
+maximum
+unavailable quality
+episode change
+player recreation
+fullscreen
+voice command
+new anime
+new tab
+
+Never pretend a quality was selected if the website did not actually switch.
+
+
+
+
+
+IMPLEMENTATION TASK: RANDOM ANIME BY GENRE
+
+Add a voice-controlled feature that finds and opens a random anime from a genre selected by the user.
+
+Examples:
+
+"Включи случайное аниме по жанру фэнтези"
+
+"Найди случайное аниме комедия"
+
+"Случайное аниме в жанре экшен"
+
+"Запусти случайное романтическое аниме"
+
+==================================================
+1. COMMAND STRUCTURE
+
+Create:
+
+RandomAnimeByGenreCommand
+
+Properties:
+
+Genre
+Site
+AutoPlay
+Provider
+Quality
+
+==================================================
+2. GENRE NORMALIZATION
+
+Support Russian aliases.
+
+Examples:
+
+"фэнтези"
+"фентези"
+
+-> Fantasy
+
+"экшен"
+"боевик"
+"action"
+
+-> Action
+
+"комедия"
+"комедийное"
+
+-> Comedy
+
+"романтика"
+"романтическое"
+
+-> Romance
+
+Create a configurable genre alias dictionary.
+
+==================================================
+3. WEBSITE SEARCH
+
+Use the actual website's genre/filter functionality whenever possible.
+
+Do not scrape thousands of pages unnecessarily.
+
+Preferred approach:
+
+1. Open genre/filter page
+2. Discover available anime
+3. Extract valid anime entries
+4. Randomly select one
+5. Open it
+
+==================================================
+4. RANDOMIZATION
+
+Do not always choose the first result.
+
+Use a proper random selection.
+
+Avoid selecting:
+
+- unavailable anime
+- deleted anime
+- empty entries
+- duplicate results
+
+==================================================
+5. OPTIONAL RANDOM EPISODE
+
+Default:
+
+Open the selected anime.
+
+Optionally support:
+
+"Включи случайное фэнтези"
+
+which means:
+
+Random anime
++
+start playback
+
+If the user says:
+
+"Найди случайное фэнтези"
+
+only open the anime page.
+
+==================================================
+6. AUTOPLAY
+
+Support:
+
+"Включи случайное фэнтези"
+
+-> random anime
+-> first episode or continue episode depending on settings
+-> select preferred provider
+-> select preferred quality
+-> start playback
+
+==================================================
+7. HISTORY INTEGRATION
+
+If the selected anime has already been watched:
+
+prefer an unwatched episode or continue from the user's history depending on settings.
+
+Do not repeatedly choose the same anime every time.
+
+Create an optional recently-selected exclusion window.
+
+Example:
+
+Do not select an anime that was randomly selected within the last 20 selections.
+
+==================================================
+8. VOICE FEEDBACK
+
+Example:
+
+"Нашёл случайное аниме в жанре фэнтези: Frieren. Запускаю."
+
+==================================================
+9. FAILURE HANDLING
+
+If no anime exists:
+
+"Не удалось найти аниме этого жанра."
+
+If the genre is ambiguous:
+
+ask the user.
+
+If the website changes:
+
+update only YummyAnimeAdapter.
+
+==================================================
+10. TESTING
+
+Test:
+
+Fantasy
+Action
+Comedy
+Romance
+Drama
+Horror
+Adventure
+
+Also test:
+
+unknown genre
+empty genre
+no results
+random repeat
+autoplay
+history integration
+multiple tabs
+
+
+IMPLEMENTATION TASK: MULTI-SITE ACCOUNT AND AUTHENTICATION SYSTEM
+
+Upgrade the existing application with a secure account system that allows the user to log into old.YummyAni.me and potentially other supported anime websites.
+
+The application already uses WebView2.
+
+DO NOT rewrite the existing WebView2 architecture.
+
+==================================================
+1. PRIMARY GOAL
+
+The user must be able to select a website:
+
+- old.YummyAni.me
+- other supported anime website adapters
+
+and log into that website using the normal website authentication flow.
+
+The application should remember the authenticated session when possible.
+
+==================================================
+2. IMPORTANT SECURITY RULE
+
+NEVER:
+
+- bypass authentication
+- bypass CAPTCHA
+- bypass 2FA
+- extract authentication tokens
+- steal/copy browser cookies
+- copy Chrome/Edge cookies
+- log session cookies
+- log passwords
+- send passwords to STT
+- send passwords to an AI model
+- send passwords to analytics
+- send passwords to third-party servers
+
+The login must happen through the website's legitimate authentication flow.
+
+==================================================
+3. WEBVIEW2 PROFILE
+
+Use a dedicated persistent WebView2 User Data Folder.
+
+Example:
+
+%LOCALAPPDATA%\\AnimeController\\WebView2\\YummyAnimeProfile
+
+The profile should preserve the website's legitimate:
+
+- cookies
+- local storage
+- session state
+- website preferences
+
+This allows the user to remain logged in between application launches when the website supports persistent sessions.
+
+==================================================
+4. ACCOUNT SERVICE
+
+Create:
+
+IAuthenticationService
+
+Implementation:
+
+WebView2AuthenticationService
+
+The service should expose states:
+
+Unknown
+Checking
+LoggedOut
+LoggingIn
+LoggedIn
+LoginFailed
+SessionExpired
+
+==================================================
+5. WEBSITE ADAPTER
+
+Create:
+
+IWebsiteAuthenticationAdapter
+
+Example:
+
+YummyAnimeAuthenticationAdapter
+
+Responsibilities:
+
+- detect login page
+- open login page
+- detect authenticated state
+- detect logged-out state
+- detect session expiration
+- open profile/account page
+- invoke normal website logout
+
+Do not put website-specific selectors throughout the application.
+
+==================================================
+6. LOGIN UI
+
+Add:
+
+Account / Authentication page.
+
+Display:
+
+Website:
+YummyAnime
+
+Status:
+Logged in / Logged out
+
+Buttons:
+
+Log In
+Open Account
+Check Authentication
+Log Out
+
+When user clicks Log In:
+
+open the real website login page inside WebView2.
+
+Allow the user to enter:
+
+username/email
+password
+
+normally.
+
+==================================================
+7. OPTIONAL REMEMBER PASSWORD
+
+DO NOT store passwords in:
+
+JSON
+SQLite
+plain text configuration
+logs
+source code
+
+If "remember password" is implemented, use a secure Windows mechanism such as:
+
+Windows Credential Manager
+or
+DPAPI-protected storage
+
+However, prefer persistent WebView2 session cookies/profile over storing passwords at all.
+
+The best default is:
+
+remember session, not password.
+
+==================================================
+8. CAPTCHA / 2FA
+
+If the website requires:
+
+CAPTCHA
+2FA
+email verification
+security confirmation
+
+do NOT attempt to bypass it.
+
+Allow the user to complete it normally inside the WebView2 browser.
+
+After completion:
+
+detect the authenticated state.
+
+==================================================
+9. AUTHENTICATION DETECTION
+
+Do NOT rely on only one CSS selector.
+
+Use multiple signals:
+
+- current URL
+- account/profile UI
+- login/logout buttons
+- authenticated page
+- website-specific indicators
+
+Create a resilient detection mechanism.
+
+==================================================
+10. VOICE COMMANDS
+
+Support:
+
+"Открой мой аккаунт"
+"Открой профиль"
+"Проверь авторизацию"
+"Я вошёл?"
+"Выйди из аккаунта"
+
+Do NOT support:
+
+"Введи мой пароль..."
+
+The application must never require the user to speak their password.
+
+==================================================
+11. MULTIPLE WEBSITES
+
+Architecture must support:
+
+WebsiteProfile
+
+Fields:
+
+SiteId
+DisplayName
+BaseUrl
+WebView2ProfilePath
+AuthenticationAdapter
+AnimeAdapter
+
+Example:
+
+YummyAnime
+
+OtherSite
+
+Each site should have isolated session/profile data when necessary.
+
+==================================================
+12. MULTIPLE ACCOUNTS
+
+Prepare the architecture for multiple accounts.
+
+Example:
+
+YummyAnime:
+Account A
+
+OtherAnimeSite:
+Account B
+
+Do not force the user to use one global authentication state.
+
+==================================================
+13. LOGOUT
+
+Logout should use the actual website logout flow whenever possible.
+
+Do not simply delete all cookies as the normal logout mechanism.
+
+After logout:
+
+verify that the website is actually logged out.
+
+==================================================
+14. ACCOUNT + VOICE SYSTEM
+
+Voice control must continue working after login.
+
+Test:
+
+Login
+→ open anime
+→ start episode
+→ fullscreen
+→ voice command
+→ exit fullscreen
+→ account page
+→ return to player
+
+==================================================
+15. ACCOUNT + WATCH HISTORY
+
+Prepare for future account synchronization.
+
+Current watch history can remain local.
+
+Architecture should allow:
+
+LocalHistory
+
+and later:
+
+AccountHistory
+
+without rewriting WatchHistoryService.
+
+==================================================
+16. SECURITY TESTS
+
+Verify:
+
+- password never appears in logs
+- password never appears in command history
+- cookies never appear in logs
+- authentication tokens never appear in logs
+- password never reaches voice command parser
+- password never reaches AI APIs
+- password never reaches analytics
+- Chrome/Edge cookies are never imported
+
+==================================================
+17. FINAL TEST
+
+Perform a real end-to-end test:
+
+1. Start application
+2. Select YummyAnime
+3. Open login
+4. Log in normally
+5. Verify authenticated state
+6. Close application
+7. Restart application
+8. Verify session persistence
+9. Open account
+10. Open anime
+11. Play episode
+12. Use voice commands
+13. Logout
+14. Verify logged-out state
+15. Login again
+
+If any part cannot be tested because the website requires interactive CAPTCHA/2FA, document that clearly instead of pretending it was tested.
+
+FINAL INTEGRATION TASK: FULL SYSTEM AUDIT, BUG FIXING AND REGRESSION TESTING
+
+The application has now received multiple major features:
+
+- persistent watch history
+- episode progress
+- multi-step voice commands
+- "play anime episode X"
+- low-latency voice recognition
+- command deduplication
+- command interruption
+- mute/unmute fixes
+- volume control
+- video quality selection
+- 360p / 480p / 720p / 1080p / 1440p / 2160p
+- maximum available quality
+- random anime by genre
+- account authentication
+- persistent WebView2 profile
+- fullscreen
+- autoplay
+- automatic next episode
+- multiple tabs
+- Release EXE packaging
+
+Now perform a complete engineering audit.
+
+==================================================
+1. DO NOT REWRITE WORKING SYSTEMS
+==================================================
+
+Inspect the existing architecture first.
+
+Do not rewrite everything simply because a different implementation is easier.
+
+Fix root causes.
+
+==================================================
+2. CHECK ARCHITECTURE
+
+Verify separation between:
+
+VoiceRecognitionService
+CommandParser
+CommandExecutor
+PlayerStateService
+PlayerControlService
+WatchHistoryService
+AuthenticationService
+QualityService
+RandomAnimeService
+TabService
+WebsiteAdapter
+YummyAnimeAdapter
+SettingsService
+LoggingService
+
+No website-specific code should leak throughout the application.
+
+==================================================
+3. CHECK VOICE LATENCY
+
+Measure:
+
+Speech end
+→ STT result
+→ command detection
+→ command execution
+
+Find unnecessary delays.
+
+Remove:
+
+Thread.Sleep
+Task.Delay
+
+when they are being used only to hide race conditions.
+
+Use:
+
+events
+awaitable state changes
+MutationObserver
+player events
+navigation events
+WebView2 events
+
+==================================================
+4. CHECK PLAYER
+
+Test:
+
+Play
+Pause
+Resume
+Next
+Previous
+Mute
+Unmute
+Volume
+Quality
+Fullscreen
+Skip Intro
+Autoplay
+Auto-next
+
+Every action must verify the resulting state.
+
+==================================================
+5. CHECK WATCH HISTORY
+
+Test:
+
+Start episode
+Pause
+Resume
+Close application
+Restart
+Continue
+Complete episode
+Next episode
+Multiple tabs
+Multiple anime
+
+==================================================
+6. CHECK ACCOUNT
+
+Test:
+
+Login
+Persistent session
+Logout
+Session expiration
+CAPTCHA
+2FA
+Restart
+Multiple websites
+Profile page
+
+Never expose credentials in logs.
+
+==================================================
+7. CHECK COMMANDS
+
+Test:
+
+"Включи One Piece 6 серию"
+
+"Включи шестую серию"
+
+"Следующая серия"
+
+"Поставь 1080"
+
+"Максимальное качество"
+
+"Включи звук"
+
+"Заглуши"
+
+"Сделай громче"
+
+"Случайное фэнтези"
+
+"Продолжи просмотр"
+
+==================================================
+8. CHECK FALSE POSITIVES
+
+Speak normal non-command sentences.
+
+The system should not execute random actions.
+
+Then immediately issue a valid command.
+
+The valid command must NOT be blocked by a global cooldown.
+
+==================================================
+9. CHECK FULLSCREEN
+
+Voice control must continue working in fullscreen.
+
+Test:
+
+enter fullscreen
+→ voice command
+→ player command
+→ next episode
+→ exit fullscreen
+
+==================================================
+10. CHECK RELEASE BUILD
+
+Do not only test Debug.
+
+Build the actual Release EXE.
+
+Run it outside Visual Studio.
+
+Test it as a normal end user would.
+
+==================================================
+11. PERFORMANCE
+
+Measure:
+
+Application startup
+WebView2 startup
+STT latency
+Command parsing latency
+Player command latency
+Episode navigation latency
+Memory usage
+
+Do not optimize blindly.
+
+Find actual bottlenecks.
+
+==================================================
+12. ERROR HANDLING
+
+Every failure should have a useful state.
+
+Examples:
+
+AnimeNotFound
+EpisodeNotFound
+PlayerNotFound
+QualityUnavailable
+AuthenticationRequired
+AuthenticationExpired
+WebsiteUnavailable
+WebViewCrashed
+VoiceRecognitionUnavailable
+
+Do not silently fail.
+
+==================================================
+13. FINAL REPORT
+
+After testing provide:
+
+1. Bugs found
+2. Bugs fixed
+3. Architecture changes
+4. Performance measurements
+5. Tests passed
+6. Tests failed
+7. Known limitations
+8. Release build location
+9. Recommended next improvements
+
+IMPORTANT:
+
+Do not report a test as passed unless it was actually executed.
+Do not hide failures.
+Do not replace real state detection with arbitrary delays.
+
+
+Я бы реализовывал в таком порядке
+
+1 → 5 → 3 → 4 → 6 → 7 → 8 → 2 → 9
+
+То есть сначала фундамент:
+
+история → голос → мультикоманды → player → качество → random → аккаунт → EXE → полный regression test.
+
+Особенно важно сначала сделать №5 про голос. Если оставить старую систему с глобальным cooldown, новые команды вроде «включи One Piece 6 серию в 1080» будут работать нестабильно независимо от того, насколько хорошо написан сам parser.
+

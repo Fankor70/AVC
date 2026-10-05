@@ -1,0 +1,59 @@
+{
+  "ranAt": "2026-10-04T04:36:11.552Z",
+  "tests": [
+    {
+      "name": "initialize",
+      "status": "PASS",
+      "detail": "state=ready, modelLoadMs=1851, warmupMs=84, err=—"
+    },
+    {
+      "name": "package-wav-format",
+      "status": "PASS",
+      "detail": "sampleRate=8000, samples=50880 (6.4 с)"
+    },
+    {
+      "name": "package-wav-decode",
+      "status": "PASS",
+      "detail": "текст: «сейчас к тебе приедет бригада давай» (724 мс)"
+    },
+    {
+      "name": "streaming-feed",
+      "status": "PASS",
+      "detail": "final=1, partial=3, обработка 636 мс на 8.4 с аудио; текст: «ну сейчас к тебе приедет бригада давай»"
+    },
+    {
+      "name": "silence-no-final",
+      "status": "PASS",
+      "detail": "final с текстом на тишине: 0 (должно быть 0)"
+    },
+    {
+      "name": "dedup-final",
+      "status": "PASS",
+      "detail": "final-событий с текстом: 0 (допустимо ≤1)"
+    }
+  ],
+  "decodedText": "сейчас к тебе приедет бригада давай",
+  "streaming": {
+    "finals": [
+      {
+        "utteranceId": 1,
+        "text": "ну сейчас к тебе приедет бригада давай",
+        "reason": "endpoint",
+        "ms": 615
+      }
+    ],
+    "partialCount": 3,
+    "streamMs": 636
+  },
+  "metrics": {
+    "modelLoadMs": 1851,
+    "warmupMs": 84,
+    "lastPartialMs": 462,
+    "lastFinalMs": 615,
+    "lastEndpointMs": null,
+    "utterances": 1,
+    "state": "ready",
+    "profile": "max_responsiveness",
+    "error": null
+  }
+}

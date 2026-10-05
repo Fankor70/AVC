@@ -1,0 +1,95 @@
+generator client {
+  provider = "prisma-client-js"
+  // native — для dev-сервера (linux), windows — Query Engine внутри portable EXE
+  binaryTargets = ["native", "windows"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// Настройки приложения (key-value): baseUrl сайта, голос, плеер и т.д.
+model AppSetting {
+  key       String   @id
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+// История голосовых команд (только текст, без аудио)
+model CommandHistoryEntry {
+  id            String   @id @default(cuid())
+  raw           String
+  normalized    String
+  command       String
+  params        String   @default("{}")
+  confidence    Float
+  success       Boolean
+  message       String?
+  source        String   @default("voice") // voice | text | gui
+  /** Сквозной id фразы (STT → парсер → действие) для диагностики задержек */
+  correlationId String?
+  createdAt     DateTime @default(now())
+}
+
+// Сохранённая сессия вкладок
+model TabSession {
+  id        String   @id @default(cuid())
+  position  Int
+  kind      String // home | section | search | anime | player
+  title     String
+  url       String   @default("")
+  payload   String   @default("{}") // JSON: sectionId / animeId / query / episode / dub
+  active    Boolean  @default(false)
+  updatedAt DateTime @updatedAt
+}
+
+// Пользовательские алиасы (озвучки/аниме/секции/команды) для голосового резолвера.
+// Глобальные (thin client: локального аккаунта больше нет, вход — на сайте YummyAnime).
+model VoiceAlias {
+  id         String   @id @default(cuid())
+  targetType String   @default("voice") // voice | anime | section | command
+  targetName String   // напр. "AniLibria" (официальное имя на сайте)
+  alias      String   // напр. "ани либрия"
+  createdAt  DateTime @default(now())
+
+  @@unique([targetType, targetName, alias])
+}
+
+// Локальный трекинг просмотра: какое аниме смотрели, на какой серии остановились.
+// Сайт прогресс серий наружу не отдаёт (только пишет PUT /video/{id} внутри
+// своей сессии), поэтому приложение ведёт собственную честную запись.
+// accountKey = userId сайта (изоляция аккаунтов) либо 'anon' для гостя.
+model WatchProgressEntry {
+  id            String   @id @default(cuid())
+  accountKey    String
+  animeId       Int
+  slug          String   @default("")
+  title         String
+  poster        String?
+  episode       Int?
+  episodesTotal Int?
+  dubbing       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([accountKey, animeId])
+}
+
+// regenerated for fresh client (task 9-b)
+
+// Пользовательские отметки таймкодов (Skip Segments P3): «запомни начало/конец
+// опенинга». Хранятся на (аниме, озвучка) и применяются к другим сериям.
+model SkipMark {
+  id         String   @id @default(cuid())
+  accountKey  String   @default("anon")
+  animeId     Int
+  dubbing     String   @default("")
+  type        String // op | ed | recap
+  startSec    Float?
+  endSec      Float?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([accountKey, animeId, dubbing, type])
+}

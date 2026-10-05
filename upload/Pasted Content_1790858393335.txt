@@ -1,0 +1,1664 @@
+Ошибка: Failed to load external module sherpa-onnx-node-ebf935fbc9aaa8ec: Error: Cannot find module 'sherpa-onnx-node-ebf935fbc9aaa8ec' Require stack: - C:\Users\jigok\OneDrive\Desktop\AVC-Anime\resources\server\.next\server\chunks\[root-of-the-server]__df72576f._.js - C:\Users\jigok\OneDrive\Desktop\AVC-Anime\resources\server\.next\server\chunks\[turbopack]_runtime.js - C:\Users\jigok\OneDrive\Desktop\AVC-Anime\resources\server\.next\server\app\api\aliases\route.js - C:\Users\jigok\OneDrive\Desktop\AVC-Anime\resources\server\node_modules\next\dist\server\require.js - C:\Users\jigok\OneDrive\Desktop\AVC-Anime\resources\server\node_modules\next\dist\server\next-server.js - C:\Users\jigok\OneDrive\Desktop\AVC-Anime\resources\server\node_modules\next\dist\server\next.js - C:\Users\jigok\OneDrive\Desktop\AVC-Anime\resources\server\server.js  
+
+
+
+Да, здесь ошибка довольно конкретная. Это не ошибка самой модели T-One, а проблема с тем, как Next.js/Turbopack пытается загрузить нативный Node-модуль sherpa-onnx-node.
+
+Ключевая строка:
+
+Failed to load external module sherpa-onnx-node-ebf935fbc9aaa8ec
+Error: Cannot find module 'sherpa-onnx-node-ebf935fbc9aaa8ec'
+
+То есть приложение пытается загрузить сгенерированное/переименованное имя native-модуля, которого физически нет в node_modules.
+
+Почему это произошло
+
+У тебя архитектура примерно такая:
+
+Next.js
+  ↓
+API route
+  ↓
+sherpa-onnx-node
+  ↓
+native .node / DLL
+
+А Turbopack/Next.js при сборке пытается обработать:
+
+require("sherpa-onnx-node")
+
+как обычную JS-зависимость.
+
+Для native Node-модулей это часто ломается, потому что пакет содержит платформенные бинарники (.node, DLL и т. п.), которые нельзя просто забандлить как обычный JavaScript.
+
+Особенно подозрительно вот это:
+
+sherpa-onnx-node-ebf935fbc9aaa8ec
+
+Вместо реального:
+
+sherpa-onnx-node
+
+Это очень похоже на результат обработки external dependency сборщиком.
+
+Я бы НЕ пытался чинить это установкой случайных пакетов
+
+Сначала проверь:
+
+cd "C:\Users\jigok\OneDrive\Desktop\AVC-Anime\resources\server"
+
+npm ls sherpa-onnx-node
+
+и:
+
+npm ls sherpa-onnx-node-win-x64
+
+Если второй пакет не существует в твоей версии — это нормально, название зависит от версии/способа распространения sherpa.
+
+Также:
+
+dir node_modules\sherpa-onnx-node
+
+Посмотри, существует ли вообще директория.
+
+Самое важное
+
+Для твоего приложения я бы вообще не подключал sherpa-onnx напрямую внутри Next.js API route.
+
+То есть плохо:
+
+Next.js
+ └── /api/voice
+      └── import sherpa-onnx-node
+
+Лучше:
+
+Electron / Desktop App
+       │
+       ├── Next.js UI
+       │
+       └── Native Speech Service
+              │
+              └── sherpa-onnx
+
+Или даже:
+
+Electron
+│
+├── Renderer
+│    └── Next.js
+│
+├── Main Process
+│
+└── Speech Engine
+     └── sherpa-onnx native
+
+Тогда Next.js вообще не должен пытаться бандлить native sherpa module.
+
+Для твоего AVC я рекомендую такой вариант
+
+У тебя судя по пути:
+
+AVC-Anime
+└── resources
+    └── server
+        ├── .next
+        ├── node_modules
+        ├── app
+        └── server.js
+
+Похоже, что у тебя Electron + Next.js.
+
+Тогда сделай:
+
+AVC-Anime
+│
+├── electron/
+│   ├── main.js
+│   └── speech/
+│       └── ...
+│
+├── resources/
+│   └── server/
+│       └── Next.js
+│
+└── models/
+    └── t-one-russian/
+
+А sherpa должен запускаться из Electron main/native layer, а не из Next.js server route.
+
+Но есть более простой вариант
+
+Если твой текущий проект написан на Node/Electron, можно оставить sherpa-onnx-node, но заставить Next.js не бандлить его.
+
+В next.config.js/next.config.mjs нужно сделать native package external.
+
+Для Next.js это примерно:
+
+const nextConfig = {
+  serverExternalPackages: [
+    'sherpa-onnx-node'
+  ]
+};
+
+export default nextConfig;
+
+Если у тебя используется Turbopack и конкретная версия Next.js ведёт себя иначе, потребуется дополнительно проверить конфигурацию сборки.
+
+Но это решает только часть проблемы.
+
+Потом в production-папке должно реально существовать:
+
+node_modules/
+└── sherpa-onnx-node/
+    ├── ...
+    └── *.node
+
+и все необходимые native DLL.
+
+Почему я бы сейчас сделал ещё один шаг
+
+Поскольку ты хочешь:
+
+Windows
+RTX 4070
+минимальную задержку
+локальный STT
+EXE
+отсутствие отдельного сервера
+автоматический запуск
+отсутствие Python
+
+я бы не стал сейчас просто чинить эту конкретную ошибку, а проверил архитектуру.
+
+У тебя сейчас:
+
+Next.js server
+      ↓
+sherpa-onnx-node
+
+А конечная цель:
+
+AVC.exe
+   ↓
+Speech Engine
+   ↓
+T-One Russian
+   ↓
+Command Parser
+
+Если оставить native STT внутри Next.js, при упаковке EXE ты потом можешь получить ещё проблемы с:
+
+.node
+DLL
+ASAR
+native module extraction
+architecture x64
+CUDA DLL
+model paths
+production vs development
+Turbopack
+Electron packaging
+Я бы дал ZAI вот такой короткий фикс-запрос
+Fix the current sherpa-onnx native module loading failure in AVC-Anime.
+
+Current error:
+
+Failed to load external module sherpa-onnx-node-ebf935fbc9aaa8ec:
+Error: Cannot find module 'sherpa-onnx-node-ebf935fbc9aaa8ec'
+
+Project:
+
+C:\Users\jigok\OneDrive\Desktop\AVC-Anime
+
+Current server:
+
+resources/server
+
+The application uses Electron + Next.js.
+
+IMPORTANT:
+
+Do NOT replace sherpa-onnx with Whisper.
+
+Do NOT install a random alternative STT library.
+
+Do NOT create a Python server.
+
+Do NOT create a separate manually launched speech server.
+
+The final application must remain self-contained.
+
+FIRST diagnose the existing installation.
+
+Run:
+
+npm ls sherpa-onnx-node
+
+Inspect:
+
+resources/server/node_modules/sherpa-onnx-node
+
+Determine the exact installed sherpa-onnx-node version and inspect its package.json, native binaries, platform-specific files, and package exports.
+
+Determine why Next.js/Turbopack transforms:
+
+sherpa-onnx-node
+
+into:
+
+sherpa-onnx-node-ebf935fbc9aaa8ec
+
+and why the resulting native module cannot be resolved.
+
+Do NOT blindly rename files.
+
+Do NOT create fake modules.
+
+Do NOT modify package-lock.json manually.
+
+The native module must be loaded using its real package/native binary.
+
+ARCHITECTURE REQUIREMENT:
+
+Because sherpa-onnx-node is a native Node module, do not allow Next.js/Turbopack to bundle it as ordinary JavaScript.
+
+Prefer:
+
+Electron Main Process
+        ↓
+Speech Engine
+        ↓
+sherpa-onnx-node
+        ↓
+T-One Russian Streaming Model
+
+Next.js should communicate with the speech engine through a controlled IPC interface.
+
+The renderer/UI must never directly import sherpa-onnx-node.
+
+If the current architecture requires sherpa-onnx-node in a Next.js API route, refactor it so the native speech engine is owned by the Electron main process.
+
+Requirements:
+
+1. sherpa-onnx must run locally.
+2. T-One Russian Streaming model must remain the STT model.
+3. No Python.
+4. No external speech server.
+5. No cloud STT.
+6. No manual process launch by the user.
+7. Model loads once.
+8. Speech engine stays alive while the application is running.
+9. Microphone audio must stream into the speech engine.
+10. Partial recognition must be supported.
+11. VAD must remain supported.
+12. Command parser receives recognized text through IPC.
+13. Voice recognition must continue working when WebView2/Next.js changes focus.
+14. The browser UI must not block STT.
+15. Do not initialize the STT model for every command.
+
+PACKAGING:
+
+The final production EXE must include:
+
+- sherpa-onnx native binaries
+- all required DLLs
+- T-One Russian model
+- VAD model
+- required runtime files
+
+Resolve native module paths correctly in development AND production.
+
+Do not assume:
+
+process.cwd()
+
+is the model location.
+
+Use an explicit runtime resource resolver supporting:
+
+development:
+project/resources/...
+
+production:
+process.resourcesPath / appropriate packaged resource path
+
+Also make sure Electron ASAR packaging does not attempt to execute native `.node` binaries directly from inside ASAR if the native module requires extraction.
+
+Configure native module unpacking appropriately.
+
+After fixing the architecture:
+
+1. delete build artifacts
+2. reinstall dependencies if necessary
+3. rebuild Next.js
+4. rebuild Electron
+5. launch production build
+6. verify sherpa-onnx loads
+7. verify T-One loads
+8. verify microphone capture
+9. verify partial recognition
+10. verify command execution
+
+Add a diagnostic command that reports:
+
+STT engine:
+sherpa-onnx
+
+Model:
+T-One Russian
+
+Provider:
+CPU/CUDA
+
+Native module:
+loaded / failed
+
+Model:
+loaded / failed
+
+VAD:
+loaded / failed
+
+Microphone:
+available / unavailable
+
+Latency:
+measured value
+
+Do not expose or log authentication cookies, passwords, tokens, or other secrets.
+
+IMPORTANT:
+
+Before modifying files, inspect the existing Electron/Next.js architecture and identify exactly where sherpa-onnx-node is currently imported.
+
+Do not rewrite unrelated parts of the application.
+
+Fix the root cause, not only the current error message.
+
+At the end provide:
+
+1. Root cause.
+2. Files changed.
+3. Exact architecture after the fix.
+4. Native module loading method.
+5. Production packaging method.
+6. Model location.
+7. Whether CPU or CUDA is currently being used.
+8. Actual measured STT startup time.
+9. Actual measured streaming latency.
+10. Confirmation that no separate server is required.
+
+Именно такой путь я бы сейчас выбрал. Ошибка у тебя выглядит не как проблема с русской моделью, а как native-module + Next.js/Turbopack bundling issue. Лучше исправить границу между Electron и Next.js сейчас, пока проект ещё не разросся.
+
+
+После того как ты исправишь ошибку сверху нужно сделать следующее (
+You are working on my existing Windows desktop application **AVC-Anime (Anime Voice Control)**.
+
+The application is a desktop anime streaming controller with an embedded **WebView2** browser. The target site is **old.YummyAni.me / YummyAnime**.
+
+I need you to implement a production-quality solution for blocking the **advertising video that plays immediately before the actual anime episode**.
+
+## CRITICAL USER PROBLEM
+
+When I open an anime episode on YummyAnime, the player does not immediately start the real episode.
+
+Instead:
+
+1. The player starts a short advertising video.
+2. The advertising video must normally be watched for approximately 15 seconds.
+3. After that, the user can press a "Skip" button / skip the advertisement.
+4. Only then does the real anime episode begin.
+
+I want AVC-Anime to prevent this advertisement from playing whenever technically possible.
+
+The desired behavior is:
+
+OPEN EPISODE
+→ advertisement is detected/prevented
+→ advertisement is blocked or skipped
+→ real episode starts automatically
+→ voice controls continue working normally
+
+Do NOT simply simulate waiting 15 seconds unless there is no technically better solution.
+
+The goal is to eliminate the advertising playback itself, not merely automate clicking "Skip" after 15 seconds.
+
+---
+
+# 1. FIRST: INSPECT THE EXISTING PROJECT
+
+Before modifying code, inspect the complete existing AVC-Anime project.
+
+Determine:
+
+* framework
+* .NET version
+* WPF/WinUI architecture
+* WebView2 package/version
+* current WebView2 initialization
+* current WebView2 profile/user-data-folder
+* current YummyAnime adapter
+* current PlayerStateService
+* current voice-control architecture
+* current AdBlockService, if one already exists
+* current WebResourceRequested handling
+* current WebView2 navigation handling
+* current injected JavaScript
+* current fullscreen implementation
+* current autoplay implementation
+* current episode switching implementation
+* current authentication/session architecture
+
+DO NOT create duplicate services if equivalent functionality already exists.
+
+Integrate into the current architecture.
+
+---
+
+# 2. DO NOT GUESS HOW YUMMYANIME ADS WORK
+
+This is extremely important.
+
+Do NOT assume that the advertisement URL contains strings such as:
+
+* ad
+* ads
+* advertising
+* banner
+* promo
+
+Do not assume that the advertisement is simply a separate MP4 file.
+
+First investigate the real YummyAnime player behavior.
+
+Use the existing application/debug infrastructure and WebView2 DevTools/network inspection where appropriate.
+
+Determine exactly what happens when an episode starts.
+
+Investigate:
+
+* network requests
+* media requests
+* XHR
+* Fetch
+* iframe requests
+* scripts
+* player configuration
+* JavaScript variables
+* player state
+* DOM changes
+* video element changes
+* source changes
+* `<video>` elements
+* iframe players
+* redirect chains
+* advertisement metadata
+* skip-ad button
+* countdown timer
+* player events
+* API requests related to advertising
+* video source changes before and after the advertisement
+* requests immediately before the real episode begins
+
+Compare:
+
+### Case A
+
+Open episode and allow advertisement to start.
+
+### Case B
+
+Open episode and immediately inspect the player/network state.
+
+Identify the difference between:
+
+ADVERTISEMENT
+
+and
+
+REAL EPISODE.
+
+Do not implement blocking until this investigation is complete.
+
+---
+
+# 3. CREATE AN AD-DETECTION MODEL
+
+Create a dedicated component if one does not already exist:
+
+`YummyAnimeAdDetector`
+
+or integrate into the existing site adapter/player system if that is architecturally cleaner.
+
+It should be able to determine:
+
+```text
+Unknown
+Advertisement
+MainContent
+```
+
+Potential signals include:
+
+* media URL/domain
+* iframe origin
+* player source URL
+* DOM markers
+* player state
+* known advertisement parameters
+* skip-ad button existence
+* countdown element
+* player configuration
+* network request patterns
+* video duration
+* source switching
+* known YummyAnime-specific structures
+
+Use multiple signals instead of relying on one fragile selector.
+
+---
+
+# 4. NETWORK-LEVEL BLOCKING
+
+The preferred solution is to stop the advertisement request before it is loaded.
+
+Use WebView2's:
+
+`CoreWebView2.WebResourceRequested`
+
+with:
+
+`AddWebResourceRequestedFilter(...)`
+
+Microsoft WebView2 supports intercepting matching requests and overriding the response. Use the current overload that includes:
+
+`CoreWebView2WebResourceRequestSourceKinds`
+
+instead of relying on the deprecated overload where possible.
+
+Reference:
+
+https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webresourcerequested
+
+https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2.addwebresourcerequestedfilter
+
+Important:
+
+Do NOT globally block:
+
+```text
+CoreWebView2WebResourceContext.Media
+```
+
+because the real anime episode is also media.
+
+Do NOT block all video requests.
+
+Only block requests proven to belong to the advertisement.
+
+---
+
+# 5. REQUEST FILTER ARCHITECTURE
+
+Implement efficient request classification.
+
+Example conceptual flow:
+
+```text
+WebResourceRequested
+        |
+        v
+Is AdBlock enabled?
+        |
+       yes
+        |
+        v
+Is request relevant?
+        |
+        v
+Fast URL/domain check
+        |
+        v
+Known advertisement?
+        |
+    +---+---+
+    |       |
+   yes      no
+    |       |
+    v       v
+ BLOCK    CONTINUE
+```
+
+The hot path must be extremely fast.
+
+Do NOT perform:
+
+* database queries
+* network requests
+* model inference
+* expensive regex scans
+* large file reads
+* asynchronous remote calls
+
+inside the critical request handler.
+
+Compile/cache rules in advance.
+
+---
+
+# 6. ALLOWLIST THE REAL YUMMYANIME CONTENT
+
+The most important safety requirement is:
+
+**Never accidentally block the actual anime video.**
+
+Create a strong first-party allowlist for legitimate YummyAnime resources.
+
+The allowlist must protect:
+
+* anime episode video
+* video CDN
+* subtitles
+* audio
+* player scripts
+* authentication
+* account pages
+* bookmarks
+* history
+* search
+* anime metadata
+* images
+* API requests
+* quality selection
+* fullscreen
+* autoplay
+* next episode
+* skip intro
+
+The allowlist must have higher priority than generic advertisement rules when a resource is known to be required for playback.
+
+---
+
+# 7. HANDLE ADVERTISEMENTS THAT USE THE SAME CDN
+
+If investigation shows that advertisements and real episodes use the same CDN/domain, do NOT simply whitelist the entire CDN.
+
+Instead identify the actual distinction.
+
+Possible distinctions:
+
+* path
+* query parameter
+* filename
+* request headers
+* referrer
+* player configuration
+* media metadata
+* API response
+* source manifest
+* content type
+* duration
+* request sequence
+* ad-specific endpoint
+* ad-specific JSON
+* ad-specific JavaScript configuration
+
+Implement the narrowest reliable rule.
+
+---
+
+# 8. IF THE AD IS GENERATED BY JAVASCRIPT
+
+If the advertisement is not loaded through an independently identifiable network request, inspect the player JavaScript.
+
+Determine whether the site:
+
+* inserts an advertisement dynamically
+* creates a temporary `<video>`
+* changes `video.src`
+* changes `<source>`
+* loads an iframe
+* invokes an ad SDK
+* uses a player API
+* creates a pre-roll state
+
+If appropriate, use:
+
+`CoreWebView2.AddScriptToExecuteOnDocumentCreatedAsync`
+
+for lightweight page-level hooks.
+
+However:
+
+Do NOT monkey-patch huge portions of the DOM.
+
+Do NOT create an expensive global MutationObserver.
+
+Do NOT continuously scan the entire page.
+
+Use targeted hooks only.
+
+---
+
+# 9. IF THE AD CANNOT BE BLOCKED NETWORK-SIDE
+
+Implement a fallback.
+
+Fallback priority:
+
+### Level 1
+
+Block advertisement network request.
+
+### Level 2
+
+Prevent advertisement source from being attached to the video element.
+
+### Level 3
+
+Detect advertisement player state and immediately switch to the real episode source.
+
+### Level 4
+
+Detect the real site's skip-ad control and activate it immediately.
+
+### Level 5
+
+Only as an absolute last resort:
+
+automate the site's normal skip mechanism.
+
+Do NOT use coordinate-based mouse automation unless absolutely necessary.
+
+Prefer:
+
+* DOM
+* JavaScript
+* WebView2
+* player APIs
+* semantic element detection
+
+---
+
+# 10. AUTOMATIC TRANSITION TO THE REAL EPISODE
+
+The final behavior should be:
+
+```text
+Episode requested
+        ↓
+Player initialized
+        ↓
+Ad detected?
+   ┌────┴────┐
+  YES        NO
+   ↓          ↓
+Block/skip   Play episode
+   ↓
+Main episode detected
+   ↓
+Play()
+   ↓
+Verify video is actually playing
+```
+
+Do not assume that calling:
+
+```javascript
+video.play()
+```
+
+means playback actually started.
+
+Verify:
+
+* `paused`
+* `currentTime`
+* `readyState`
+* `networkState`
+* `duration`
+* `video.src`
+* `video.currentSrc`
+* `play`
+* `playing`
+* `waiting`
+* `canplay`
+* `loadedmetadata`
+* `error`
+
+Use the existing `PlayerStateService` if present.
+
+---
+
+# 11. IMPORTANT: PRESERVE AUTOPLAY
+
+The existing application already needs automatic episode playback.
+
+After the advertisement is blocked/skipped:
+
+```text
+real episode detected
+→ call PlayVideo()
+→ await/handle play()
+→ verify playing state
+→ update PlayerStateService
+```
+
+If the browser rejects autoplay:
+
+implement the existing application fallback rather than creating a separate unrelated system.
+
+Do not break:
+
+* voice "play"
+* automatic playback
+* automatic next episode
+* fullscreen
+* quality selection
+
+---
+
+# 12. PRESERVE VOICE CONTROL
+
+The advertisement blocker must not interfere with the local speech recognition system.
+
+Do not:
+
+* block microphone requests
+* block local STT
+* block sherpa-onnx
+* block Silero VAD
+* add delays to the voice command pipeline
+* introduce global cooldowns
+* freeze the UI thread
+* wait synchronously for network filtering
+
+Voice commands must still work during and immediately after episode startup.
+
+Examples:
+
+```text
+"Запусти"
+"Пауза"
+"Продолжи"
+"Следующая серия"
+"Предыдущая серия"
+"На весь экран"
+"Качество 1080"
+"Пропусти заставку"
+```
+
+---
+
+# 13. PRESERVE ACCOUNT AND SITE FUNCTIONALITY
+
+The blocker must NOT interfere with:
+
+* login
+* cookies
+* session persistence
+* account profile
+* avatar
+* bookmarks
+* watch history
+* watch progress
+* search
+* anime pages
+* episode lists
+
+Never block authentication resources.
+
+Never log:
+
+* passwords
+* cookies
+* access tokens
+* refresh tokens
+* authorization headers
+
+---
+
+# 14. ADD YUMMYANIME-SPECIFIC RULES
+
+Create a site-specific rule layer:
+
+```text
+AdBlock
+  |
+  +-- GenericRules
+  |
+  +-- YummyAnimeRules
+  |
+  +-- YummyAnimeExceptions
+```
+
+This is important because generic ad-blocking rules alone may not correctly handle a custom video player.
+
+Keep YummyAnime rules isolated so that future website changes can be fixed without rewriting the entire engine.
+
+---
+
+# 15. RULE PRIORITY
+
+Use deterministic rule priority:
+
+```text
+1. Explicit site/player safety allowlist
+2. Explicit YummyAnime exceptions
+3. Known main-video resources
+4. Known advertisement rules
+5. Generic advertisement rules
+6. Default allow
+```
+
+Never use:
+
+```text
+"unknown media = advertisement"
+```
+
+Unknown media must remain allowed unless there is strong evidence it is an advertisement.
+
+---
+
+# 16. REDIRECT HANDLING
+
+Investigate redirects.
+
+For example:
+
+```text
+episode request
+    ↓
+redirect
+    ↓
+ad server
+    ↓
+advertisement
+```
+
+or:
+
+```text
+player API
+    ↓
+temporary source
+    ↓
+advertisement
+    ↓
+real source
+```
+
+The detector must consider redirect chains and resulting URLs.
+
+Do not break legitimate redirects used by:
+
+* CDN
+* subtitles
+* authentication
+* player
+* episode source
+
+---
+
+# 17. IFRAME SUPPORT
+
+The advertisement may be inside an iframe.
+
+Make sure WebView2 request filtering uses the modern request-source-kind-aware API where required.
+
+Do not rely on the deprecated filter overload if it causes iframe requests to be missed.
+
+Microsoft explicitly documents that the newer overload should be used for iframe/source-kind handling.
+
+Reference:
+
+https://learn.microsoft.com/en-us/dotnet/api/microsoft.web.webview2.core.corewebview2.addwebresourcerequestedfilter
+
+---
+
+# 18. SPA NAVIGATION SUPPORT
+
+YummyAnime may behave like a SPA.
+
+The ad blocker must continue working after:
+
+* changing anime
+* changing episode
+* navigating between tabs
+* search
+* going back
+* going forward
+* opening an episode without a full browser reload
+* changing player source
+* switching quality
+
+Do not initialize the blocker only once during application startup and assume it will always work.
+
+The WebView2-level network interception should remain active.
+
+Player/DOM hooks should be re-established when necessary.
+
+---
+
+# 19. MUTATION OBSERVER
+
+If MutationObserver is necessary, make it targeted.
+
+BAD:
+
+```javascript
+new MutationObserver(() => {
+    scanEntireDocument();
+}).observe(document, {
+    childList: true,
+    subtree: true
+});
+```
+
+Do not continuously scan the entire website.
+
+GOOD:
+
+Observe only the player container or known player subtree.
+
+Throttle/debounce changes.
+
+Disconnect observers when the player is destroyed.
+
+Reconnect when the player is recreated.
+
+---
+
+# 20. DO NOT BREAK THE REAL VIDEO
+
+This is the highest priority.
+
+Before considering the implementation complete, test:
+
+### Playback
+
+* episode starts
+* no advertisement playback
+* main episode plays
+* video time advances
+* pause works
+* resume works
+* seek works
+* volume works
+* mute/unmute works
+
+### Quality
+
+* 360p
+* 480p
+* 720p
+* 1080p
+* 1440p if available
+* 2160p/4K if available
+
+Do not assume every quality exists.
+
+### Player
+
+* fullscreen
+* picture-in-picture if supported
+* subtitles
+* audio tracks
+* skip intro
+* next episode
+* previous episode
+
+### Account
+
+* login
+* logout
+* session persistence
+* history
+* bookmarks
+* profile
+
+### Voice
+
+* play
+* pause
+* resume
+* next
+* previous
+* quality
+* fullscreen
+* skip intro
+
+---
+
+# 21. ADD A DEBUG MODE
+
+Create an optional diagnostic mode:
+
+```text
+AdBlock Diagnostics
+-------------------
+
+URL
+ResourceType
+RequestSourceKind
+Domain
+Decision
+Rule
+Reason
+Timestamp
+```
+
+Example:
+
+```text
+https://example-ad-server.com/video.mp4
+Media
+CrossOriginFrame
+BLOCK
+YummyAnime.PreRoll.AdDomain
+```
+
+Another:
+
+```text
+https://cdn.example.com/anime/episode01/1080p.m3u8
+Media
+MainFrame
+ALLOW
+YummyAnime.MainVideo
+```
+
+Never expose:
+
+* cookies
+* passwords
+* authorization headers
+* access tokens
+* refresh tokens
+* private account data
+
+Sanitize sensitive query parameters.
+
+---
+
+# 22. PERFORMANCE REQUIREMENT
+
+The ad blocker must have essentially zero noticeable impact on normal browsing/video playback.
+
+Do not perform expensive work in:
+
+`WebResourceRequested`
+
+The request hot path should use:
+
+* precompiled rules
+* HashSet
+* dictionary
+* efficient domain matching
+* cached decisions
+* simple resource-type checks
+* fast allowlist checks
+
+Avoid repeatedly running complex regular expressions.
+
+If regex rules are needed, compile/cache them.
+
+Do not perform:
+
+```text
+database query
+network request
+file read
+model inference
+JSON parsing of huge payload
+```
+
+for every resource request.
+
+---
+
+# 23. DO NOT BLOCK THE MAIN UI THREAD
+
+The following must remain responsive:
+
+* WebView2
+* WPF UI
+* voice recognition
+* sherpa-onnx
+* Silero VAD
+* player monitoring
+
+The ad blocker must not introduce synchronous waits.
+
+---
+
+# 24. GENERIC FILTER LISTS
+
+Investigate whether an existing mature open-source filtering engine can safely be embedded instead of reinventing a complete ad-blocking syntax parser.
+
+Investigate:
+
+* license
+* .NET compatibility
+* Windows compatibility
+* performance
+* maintenance status
+* filter syntax support
+* memory usage
+* commercial redistribution implications
+
+If a mature compatible engine is appropriate, use it.
+
+If not, implement a focused filtering engine.
+
+Do not claim "uBlock Origin compatibility" unless the implementation actually supports the required syntax.
+
+At minimum, consider support for common patterns such as:
+
+```text
+||example.com^
+@@||example.com^
+$script
+$image
+$media
+$xhr
+$fetch
+$font
+$third-party
+```
+
+Only implement syntax that is actually supported and tested.
+
+---
+
+# 25. FILTER LIST UPDATES
+
+If external filter lists are used:
+
+* cache locally
+* update asynchronously
+* validate downloaded data
+* use atomic replacement
+* retain the previous working version if update fails
+* do not block application startup waiting for a filter-list download
+* do not make playback depend on internet availability of the filter-list server
+
+The app must work using the last known-good rules while offline.
+
+Also create a local YummyAnime-specific rule file.
+
+---
+
+# 26. AD BLOCK TOGGLE
+
+Add a setting:
+
+```text
+AdBlock:
+[ON]
+```
+
+Possible states:
+
+```text
+Enabled
+Disabled
+```
+
+When disabled:
+
+* no advertisement blocking rules should be applied
+* normal website behavior should return
+
+Do not require application restart unless technically unavoidable.
+
+---
+
+# 27. PER-SITE SETTINGS
+
+Architecture should support:
+
+```text
+Global AdBlock: ON
+
+YummyAnime:
+    AdBlock: ON
+
+OtherSite:
+    AdBlock: ON/OFF
+```
+
+Do not hard-code the entire system specifically to one website.
+
+Use:
+
+```text
+ISiteAdapter
+IAdBlockPolicy
+```
+
+or an equivalent existing abstraction.
+
+---
+
+# 28. IMPORTANT: DO NOT USE SYSTEM-WIDE BLOCKING
+
+This is an application-only feature.
+
+Do NOT:
+
+* modify Windows hosts file
+* install a system proxy
+* modify Windows network settings
+* install a system-wide VPN
+* modify other browsers
+* install a browser extension
+* interfere with other applications
+
+Only AVC-Anime's embedded WebView2 should be affected.
+
+---
+
+# 29. PRODUCTION PACKAGING
+
+The feature must work in the actual packaged EXE, not only in development.
+
+Check:
+
+* WebView2 runtime
+* resources
+* rule files
+* configuration
+* native dependencies if used
+* ASAR/package extraction if applicable
+* release build paths
+
+Do not rely on:
+
+```text
+C:\project\...
+```
+
+or development-only paths.
+
+---
+
+# 30. TEST THE REAL SITE
+
+Do not declare success based only on mocked URLs.
+
+Use the real YummyAnime site during development/testing.
+
+Test the exact flow:
+
+1. Launch AVC-Anime.
+2. Open YummyAnime.
+3. Navigate to an anime.
+4. Open an episode.
+5. Observe the initial player.
+6. Confirm whether the 15-second advertisement appears.
+7. Enable AdBlock.
+8. Open the same episode.
+9. Confirm whether the advertisement request is blocked.
+10. Confirm that the real episode starts.
+11. Confirm that video playback is stable.
+12. Confirm voice control still works.
+
+Also test when:
+
+* changing episode
+* changing anime
+* reopening the same episode
+* refreshing the page
+* navigating back/forward
+* changing video quality
+* enabling fullscreen
+
+---
+
+# 31. IMPORTANT ANTI-REGRESSION TEST
+
+The following must remain working:
+
+```text
+Login
+Session persistence
+Search
+Anime navigation
+Episode navigation
+Watch history
+Bookmarks
+Watch progress
+Video playback
+Quality
+Subtitles
+Fullscreen
+Autoplay
+Auto-next
+Skip intro
+Voice control
+STT
+VAD
+Mute/unmute
+```
+
+If an ad-block rule breaks any of these, the rule must be corrected rather than simply disabling the entire AdBlock system.
+
+---
+
+# 32. DO NOT USE A 15-SECOND TIMER AS THE PRIMARY SOLUTION
+
+Do NOT implement:
+
+```text
+wait 15 seconds
+click skip
+```
+
+as the normal behavior.
+
+That is only the emergency fallback if the advertisement cannot be blocked technically.
+
+Preferred:
+
+```text
+detect ad
+→ block ad before playback
+→ detect main video
+→ play main video
+```
+
+---
+
+# 33. HANDLE SITE CHANGES
+
+Create the system so that if YummyAnime changes its player later, I can update:
+
+```text
+YummyAnimeRules
+YummyAnimeAdDetector
+YummyAnimePlayerAdapter
+```
+
+without rewriting the entire application.
+
+Add clear logging when the detector encounters an unknown player/ad state.
+
+Example:
+
+```text
+[YummyAnime]
+Unknown pre-roll detected
+Player source changed
+Ad detection inconclusive
+Fallback skip mechanism available
+```
+
+This will make future maintenance much easier.
+
+---
+
+# 34. FINAL ACCEPTANCE CRITERIA
+
+The implementation is accepted only if:
+
+### A
+
+The initial YummyAnime advertisement no longer plays whenever it can be technically blocked.
+
+### B
+
+The real anime episode starts automatically.
+
+### C
+
+The actual episode video is never accidentally blocked.
+
+### D
+
+The solution works after SPA navigation and episode changes.
+
+### E
+
+Voice control remains functional.
+
+### F
+
+Fullscreen remains functional.
+
+### G
+
+Quality selection remains functional.
+
+### H
+
+Subtitles remain functional.
+
+### I
+
+Login/session/history/bookmarks remain functional.
+
+### J
+
+No system-wide network changes are made.
+
+### K
+
+Performance impact is negligible.
+
+### L
+
+Production EXE works, not just development mode.
+
+### M
+
+There is a diagnostic mode showing why a request was blocked.
+
+---
+
+# 35. REQUIRED FINAL REPORT
+
+When finished, give me a concise technical report containing:
+
+## Advertisement discovery
+
+* Where the advertisement came from
+* Which request/resource/player mechanism was responsible
+* How it differs from the real episode
+
+## Implementation
+
+* Files created
+* Files modified
+* Classes/services created
+* WebView2 APIs used
+* JavaScript hooks used, if any
+* Rule engine used
+
+## Blocking strategy
+
+Explain the exact mechanism:
+
+```text
+Network
+DOM
+Player
+Skip fallback
+```
+
+and which one is primary.
+
+## Safety
+
+Explain how you prevent blocking:
+
+* real episode
+* subtitles
+* authentication
+* CDN
+* player
+* API
+
+## Performance
+
+Report:
+
+* request classification overhead
+* memory overhead
+* CPU overhead
+* startup overhead
+
+Use actual measurements where possible.
+
+## Testing
+
+Report PASS/FAIL for:
+
+* homepage
+* search
+* anime page
+* login
+* profile
+* bookmarks
+* history
+* episode
+* advertisement
+* main video
+* subtitles
+* quality
+* fullscreen
+* autoplay
+* next episode
+* voice commands
+
+## Known limitations
+
+Be honest.
+
+If YummyAnime uses a mechanism that cannot be safely blocked without risking the actual video, explain exactly why and implement the safest fallback.
+
+Do NOT claim "100% ad-free" unless it has actually been demonstrated against the current site behavior.
+
+---
+
+# FINAL RULE
+
+Do not blindly write code first.
+
+First inspect the existing AVC-Anime architecture and investigate the real YummyAnime advertisement flow.
+
+Then implement the smallest robust solution that blocks the pre-roll advertisement while preserving the real video.
+
+Do not replace the existing architecture with a new application.
+
+Modify the existing project.
+
+)
+
+Также я скинул фото где есть ошибка отображения интерфейса, а именно кнопка отправить пересекается с названием аниме, нужно это исправить и она прям маленькая, невозможно вписывать туда команды. Также сломались команды по типу "Наруто" и мне не выдает требуемое аниме и другие название также, только если я пишу Наруто 6 серия или другая серия, тогда выдает, раньше такого не было надо это будет исправить обязательно. 
+
+Также для проекта надо сделать сохранение логов, чтобы следующая модель могла в этом разобраться что в проекте уже сделана и чтобы модели или агенты читали этот лог и понимали как написана архитектура приложение и прочие нюансы.
+
+Еще одну вещь которую ты должен добавить перед тем как собрать приложение полностью в рабочем виде нужно еще исправить ошибку авторизации через YummyAnime, а именно выдает такую ошибку "Некорректный ответ сайта" 
