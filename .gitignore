@@ -1,0 +1,11 @@
+node_modules/
+.next/
+dist/
+db/
+*.log
+.env
+electron-app/node_modules/
+electron-app/dist/
+electron-app/ai-pack/
+electron-app/models/
+tsconfig.tsbuildinfo

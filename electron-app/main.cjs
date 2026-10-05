@@ -529,7 +529,50 @@ async function createMainWindow(url) {
     markStartup('ui-usable')
     writeStartupReport()
   })
+  // Страница может ДОГРУЗИТЬСЯ раньше подписки (быстрый локальный сервер) — тогда
+  // did-finish-load уже не придёт и startup-report останется от прошлой сборки.
+  if (!mainWindow.webContents.isLoading()) {
+    markStartup('ui-usable')
+    writeStartupReport()
+  }
   return mainWindow
+}
+
+/**
+ * Реальный путь EXE для подмены при обновлении.
+ * Портативная сборка: app.getPath('exe') — ВРЕМЕННАЯ распаковка в %TEMP%;
+ * подмена туда «успешно» стирается при следующем запуске с настоящего лаунчера
+ * (баг «скачалось, но подмены не было» в 1.0.25). Настоящий файл — стаб-лаунчер,
+ * он является родительским процессом распакованной копии.
+ */
+function resolveUpdateTargetExe() {
+  const current = app.getPath('exe')
+  try {
+    const out = require('child_process')
+      .execFileSync(
+        'powershell.exe',
+        ['-NoProfile', '-Command',
+          `$p=Get-CimInstance Win32_Process -Filter "ProcessId=${process.pid}"; if($p){(Get-CimInstance Win32_Process -Filter "ProcessId=$($p.ParentProcessId)").ExecutablePath}`],
+        { encoding: 'utf8', timeout: 10000 },
+      )
+      .toString()
+      .trim()
+    const isTempPath = /\\AppData\\Local\\Temp\\/i.test(out)
+    if (
+      out &&
+      /\.exe$/i.test(out) &&
+      fs.existsSync(out) &&
+      path.resolve(out) !== path.resolve(current) &&
+      !isTempPath &&
+      /AVC-Anime/i.test(path.basename(out))
+    ) {
+      log(`[Update] Портативный режим: цель обновления — лаунчер ${out}`)
+      return out
+    }
+  } catch {
+    /* не portable или PowerShell недоступен — обновляем текущий exe как раньше */
+  }
+  return current
 }
 
 function setupIpc(service) {
@@ -741,8 +784,19 @@ function startAiWorker(retry = 0) {
       ? path.join(process.resourcesPath, 'ai', 'ai-worker.cjs')
       : path.join(__dirname, 'ai', 'ai-worker.cjs')
     if (aiWorker) {
-      try { aiWorker.kill() } catch { /* уже мёртв */ }
+      // Перезапуск: отклоняем висящие запросы СТАРОГО воркера и глушим его
+      // exit-обработчик (см. guard ниже) — иначе его 'exit' сработает ПОСЛЕ
+      // создания нового и обнулит ссылку уже на НОВОГО воркера (гонка,
+      // «завершился сам (код ?)» при каждом ручном перезапуске + зомби-процессы).
+      const stale = aiWorker
+      try { stale.kill() } catch { /* уже мёртв */ }
       aiWorker = null
+      for (const [id, p] of aiWorkerPending) {
+        clearTimeout(p.timer)
+        p.reject(new Error('AI-воркер перезапущен'))
+        aiWorkerPending.delete(id)
+      }
+      try { stale.removeAllListeners('exit') } catch { /* не критично */ }
     }
     const nodeExe = findSystemNode()
     if (!nodeExe) {
@@ -757,7 +811,7 @@ function startAiWorker(retry = 0) {
       notifyWorkerState()
       return
     }
-    aiWorker = childFork(workerScript, [], {
+    const child = childFork(workerScript, [], {
       execPath: nodeExe,
       env: {
         ...process.env,
@@ -769,11 +823,14 @@ function startAiWorker(retry = 0) {
       stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       serialization: 'advanced',
     })
+    // Присваиваем ДО навески слушателей: exit-обработчик сравнивает с текущим
+    // aiWorker и молчит, если умер воркер предыдущего поколения.
+    aiWorker = child
     aiWorkerFailed = null
     aiWorkerSpawnAt = Date.now()
-    aiWorker.stdout && aiWorker.stdout.on('data', (d) => log(`[AIWorker] ${String(d).trim().slice(0, 300)}`))
-    aiWorker.stderr && aiWorker.stderr.on('data', (d) => log(`[AIWorker] ${String(d).trim().slice(0, 300)}`))
-    aiWorker.on('message', (msg) => {
+    child.stdout && child.stdout.on('data', (d) => log(`[AIWorker] ${String(d).trim().slice(0, 300)}`))
+    child.stderr && child.stderr.on('data', (d) => log(`[AIWorker] ${String(d).trim().slice(0, 300)}`))
+    child.on('message', (msg) => {
       if (msg && msg.event) {
         if (msg.event === 'services-status') markStartup('ai-worker-services-status')
         // переустановка модели в карантине снята — честно чистим флаги
@@ -796,7 +853,10 @@ function startAiWorker(retry = 0) {
         else pending.reject(new Error(msg.error || 'ошибка AI-воркера'))
       }
     })
-    aiWorker.on('exit', (code) => {
+    child.on('exit', (code) => {
+      // Guard гонки: 'exit' от СТАРОГО воркера (убит при перезапуске) не должен
+      // трогать уже назначенный НОВЫЙ aiWorker и пугать UI ложной смертью.
+      if (aiWorker !== child) return
       aiWorker = null
       for (const [id, p] of aiWorkerPending) {
         clearTimeout(p.timer)
@@ -1208,7 +1268,7 @@ function setupAiIpc() {
 
       // 3. Маркер результата (сверится при следующем старте — §3.12)
       send({ phase: 'preparing', shaVerified })
-      const exePath = app.getPath('exe')
+      const exePath = resolveUpdateTargetExe()
       const prevPath = path.join(path.dirname(exePath), 'AVC-Anime-previous.exe')
       fs.writeFileSync(
         updatePendingMarkerPath(),
@@ -1279,6 +1339,27 @@ function setupAiIpc() {
       send({ phase: 'error', error: e.message })
       return { ok: false, error: e.message }
     }
+  })
+
+  // Резервный канал управления плеером: НАСТОЯЩИЕ нажатия клавиш через Electron
+  // (sendInputEvent — доверенные события). Работают с ЛЮБЫМ плеером сайта, даже
+  // если его postMessage-протокол изменился: Space = play/pause, ←/→ = перемотка,
+  // ↑/↓ = громкость, M = mute, F = полный экран. Ключи шлются парой keyDown+keyUp
+  // в текущий документ; фокус на iframe ставит рендерер (см. player-bridge).
+  ipcMain.handle('avc:player:send-key', (_e, args) => {
+    if (!mainWindow || mainWindow.isDestroyed()) return false
+    const keys = Array.isArray(args && args.keys) ? args.keys : []
+    for (const k of keys.slice(0, 20)) {
+      const keyCode = String((k && k.keyCode) || '').trim()
+      if (!keyCode) continue
+      try {
+        mainWindow.webContents.sendInputEvent({ type: 'keyDown', keyCode })
+        mainWindow.webContents.sendInputEvent({ type: 'keyUp', keyCode })
+      } catch {
+        /* окно могли закрыть в момент отправки */
+      }
+    }
+    return true
   })
 
   ipcMain.handle('avc:ai:open-logs', async () => {

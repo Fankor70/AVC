@@ -48,6 +48,13 @@ contextBridge.exposeInMainWorld('avcElectron', {
   animeAction: (req) => ipcRenderer.invoke('avc:anime:action', req),
 
   /**
+   * Резервное управление плеером: настоящие (доверенные) нажатия клавиш
+   * в сфокусированный iframe плеера. keys = [{ keyCode: ' '| 'ArrowLeft'| … }].
+   * Работает с любым плеером сайта даже при смене его postMessage-протокола.
+   */
+  playerSendKey: (keys) => ipcRenderer.invoke('avc:player:send-key', { keys }),
+
+  /**
    * Прочитать своё состояние тайтла (список/избранное/оценка) внутри сессии
    * сайта — подсветка активного статуса/сердца/оценки на странице аниме.
    * Наружу — только не-секретное состояние { listId, isFavorite, rating }.

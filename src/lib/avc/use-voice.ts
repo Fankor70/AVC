@@ -46,6 +46,40 @@ const ERROR_CLEAR_MS = 4000
 /** Троттлинг обновления micLevel (~10 раз/с) */
 const MIC_LEVEL_INTERVAL_MS = 100
 
+// --- Сеанс голосового управления ---------------------------------------------
+// В режиме постоянного прослушивания микрофон слышит всё, но команды принимаются
+// только внутри сеанса: «войс включить» — открыть, «войс выключить» — закрыть.
+// Нормализация фраз: STT передаёт «войс» по-разному (войск/бойс/войtс), поэтому
+// сравниваем по нормализованной строке целиком.
+const SESSION_ON_PHRASES = [
+  'войс включить',
+  'войск включить',
+  'голос включить',
+  'включи войс',
+  'включи голос',
+  'бойс включить',
+  'войс запусти',
+]
+const SESSION_OFF_PHRASES = [
+  'войс выключить',
+  'войск выключить',
+  'голос выключить',
+  'выключи войс',
+  'выключи голос',
+  'бойс выключить',
+  'войс стоп',
+]
+
+/** Мини-нормализация фразы под сравнение с SESSION_*_PHRASES */
+function sessionPhrase(text: string): string {
+  return text
+    .toLowerCase()
+    .replace(/ё/g, 'е')
+    .replace(/[^a-zа-я\s]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
 // --- Web Speech API (минимальные типы) ---------------------------------------
 
 interface SpeechRecognitionAlternativeLike {
@@ -333,6 +367,25 @@ export function useVoice(): VoiceApi {
             setVoiceStatus('idle', '')
             return
           }
+        } else if (alwaysRef.current && !settings.wakeWordEnabled) {
+          // Сеансовый режим: микрофон слушает постоянно, но команды выполняются
+          // только пока сеанс активен («войс включить» → «войс выключить»)
+          const phrase = sessionPhrase(text)
+          const st = useAvcStore.getState()
+          if (SESSION_OFF_PHRASES.includes(phrase)) {
+            st.setVoiceSession(false)
+            setVoiceStatus('idle', 'Голосовое управление выключено — скажите «войс включить»')
+            return
+          }
+          if (!st.voiceSession) {
+            if (SESSION_ON_PHRASES.includes(phrase)) {
+              st.setVoiceSession(true)
+              setVoiceStatus('idle', 'Слушаю — голосовое управление включено')
+            } else {
+              setVoiceStatus('idle', 'Голосовые команды выключены — скажите «войс включить»')
+            }
+            return
+          }
         }
 
         setVoiceStatus('executing', commandText)
@@ -585,11 +638,42 @@ export function useVoice(): VoiceApi {
    * T-One стриминговый STT в AI-воркере. Частичные результаты — interimText +
    * безопасное раннее исполнение (§12); финал — тот же handleRecognizedText (§41).
    */
+  /**
+   * Полностью закрыть локальную аудио-сессию: disconnect + AudioContext.close().
+   * БАГ «первые слова норм, дальше ломается»: контекст сессии ранее не закрывался —
+   * старый ScriptProcessor продолжал жить и кормить распознаватель ПАРАЛЛЕЛЬНО
+   * с новым сеансом (после 2–3 фраз несколько «призрачных» потоков нарезали
+   * аудио друг друга в мусор). Теперь сессия закрывается насовсем.
+   */
+  const closeLocalSession = useCallback(() => {
+    const local = localSessionRef.current
+    localSessionRef.current = null
+    if (local) {
+      try {
+        local.processor.disconnect()
+      } catch {
+        /* уже разобрано */
+      }
+      try {
+        local.source.disconnect()
+      } catch {
+        /* уже разобрано */
+      }
+      try {
+        void local.ctx.close().catch(() => undefined)
+      } catch {
+        /* уже закрыт */
+      }
+    }
+  }, [])
+
   const startLocalSession = useCallback(async () => {
     const seq = sessionSeqRef.current
     const ai = getElectronBridge()?.ai
     if (!ai?.available) return false
     try {
+      // страховка: не оставляем «призрак» прошлой сессии (утечка AudioContext)
+      closeLocalSession()
       const settings = useAvcStore.getState().settings
       const stream = await ensureStream()
       if (seq !== sessionSeqRef.current || !mountedRef.current) return true
@@ -629,7 +713,7 @@ export function useVoice(): VoiceApi {
           } catch {
             /* уже разобрано */
           }
-          localSessionRef.current = null
+          closeLocalSession()
           teardownAudio()
           useAvcStore
             .getState()
@@ -812,7 +896,7 @@ export function useVoice(): VoiceApi {
     // Локальный движок: завершить фразу в воркере (final придёт событием)
     const local = localSessionRef.current
     if (local) {
-      localSessionRef.current = null
+      closeLocalSession()
       teardownAudio()
       const ai = getElectronBridge()?.ai
       // снимаем режим рации → движок завершает захваченную фразу,
@@ -861,6 +945,8 @@ export function useVoice(): VoiceApi {
       setAlwaysListeningState(v)
       alwaysRef.current = v
       const st = useAvcStore.getState()
+      // новый режим — сеанс всегда начинается закрытым
+      st.setVoiceSession(false)
       const mode = v ? 'always-listening' : 'push-to-talk'
       if (st.settings.voiceMode !== mode) {
         st.updateSettings({ voiceMode: mode })

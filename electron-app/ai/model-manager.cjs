@@ -528,8 +528,14 @@ class AIModelManager extends EventEmitter {
 
     this.emit('progress', { key: spec.key, id: spec.id, phase: 'extracting' })
     if (spec.archive === 'tar.bz2') {
-      // Windows: bsdtar входит в Windows 10+ (System32); Linux/macOS: системный tar
-      const tar = process.platform === 'win32' ? 'tar' : 'tar'
+      // Windows: только bsdtar из System32. Голый 'tar' по PATH может указывать на
+      // GNU tar (Git for Windows): он трактует 'C:\...' как host:path и падает
+      // «Cannot connect to C: resolve failed» (релиз 1.0.19 на машинах с Git Bash).
+      let tar = 'tar'
+      if (process.platform === 'win32') {
+        const bsdtar = path.join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'tar.exe')
+        tar = fs.existsSync(bsdtar) ? bsdtar : 'tar'
+      }
       const res = spawnSync(tar, ['-xjf', archivePath, '-C', spec.dir, '--strip-components=1'], { encoding: 'utf8' })
       if (res.status !== 0) {
         throw new DownloadError('EXTRACT', `Не удалось распаковать архив: ${(res.stderr || res.stdout || 'неизвестная ошибка tar').slice(0, 300)}`)

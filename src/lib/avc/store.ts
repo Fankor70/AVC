@@ -97,6 +97,9 @@ export interface AvcState {
   /** Диалог обновления приложения (state-машина §3.5, только EXE) */
   updateDialogOpen: boolean
   voiceConfirm: VoiceConfirmState | null
+  /** Сеанс голосового управления: команды принимаются только пока он активен
+   *  («войс включить» / «войс выключить»). Рантайм-состояние, в БД не пишется. */
+  voiceSession: boolean
   /** Громкость до Mute — для восстановления при Unmute */
   prevVolume: number
 
@@ -138,6 +141,7 @@ export interface AvcState {
   setAuthOpen: (v: boolean) => void
   setUpdateDialogOpen: (v: boolean) => void
   setVoiceConfirm: (vc: VoiceConfirmState | null) => void
+  setVoiceSession: (active: boolean) => void
   setPrevVolume: (v: number) => void
 
   // --- действия: настройки/прочее ---
@@ -236,6 +240,7 @@ export const useAvcStore = create<AvcState>()((set, get) => ({
   authOpen: false,
   updateDialogOpen: false,
   voiceConfirm: null,
+  voiceSession: false,
   prevVolume: 70,
 
   // --- вкладки ---------------------------------------------------------------
@@ -354,6 +359,7 @@ export const useAvcStore = create<AvcState>()((set, get) => ({
   setAuthOpen: (v) => set({ authOpen: v }),
   setUpdateDialogOpen: (v) => set({ updateDialogOpen: v }),
   setVoiceConfirm: (vc) => set({ voiceConfirm: vc }),
+  setVoiceSession: (active) => set({ voiceSession: active }),
   setPrevVolume: (v) => set({ prevVolume: v }),
 
   // --- настройки / прочее ---------------------------------------------------------

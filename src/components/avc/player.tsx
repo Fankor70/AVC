@@ -49,6 +49,8 @@ import {
   parsePlayerEvent,
   playerToStoreVolume,
   pushPlayerVolume,
+  notePlayerActivity,
+  registerPlayerElement,
   registerPlayerWindow,
   requestPlayerTime,
   sendPlayerCommand,
@@ -233,12 +235,17 @@ export function Player() {
     }
   }
 
-  // Регистрируем окно плеера в мосту (executor шлёт команды через мост)
+  // Регистрируем окно плеера в мосту (executor шлёт команды через мост);
+  // элемент iframe — для фокуса в резервном клавиатурном канале.
   useEffect(() => {
     if (iframeRef.current?.contentWindow) {
       registerPlayerWindow(iframeRef.current.contentWindow)
     }
-    return () => registerPlayerWindow(null)
+    registerPlayerElement(iframeRef.current)
+    return () => {
+      registerPlayerWindow(null)
+      registerPlayerElement(null)
+    }
   }, [url])
 
   // SkipResolver: сегменты пропуска для текущей серии (кнопка + голос + автопропуск).
@@ -294,6 +301,7 @@ export function Player() {
     const onMsg = (e: MessageEvent) => {
       // только сообщения именно от нашего iframe (не от рекламных и т.п.)
       if (!iframeRef.current || e.source !== iframeRef.current.contentWindow) return
+      notePlayerActivity() // живой постMessage-канал — резерв клавиш не нужен
       const ev = parsePlayerEvent(e.data)
       if (!ev) return
       const st = useAvcStore.getState()

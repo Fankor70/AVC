@@ -10,7 +10,7 @@
  *   GET /api/site/diagnostics
  */
 import { NextRequest, NextResponse } from 'next/server'
-import { getAdapter } from '@/lib/sites/yummy/adapter'
+import { clearSiteCache, getAdapter } from '@/lib/sites/yummy/adapter'
 import { SiteSectionId } from '@/lib/avc/types'
 
 export const dynamic = 'force-dynamic'
@@ -36,6 +36,13 @@ export async function GET(
 
   try {
     switch (resource) {
+      case 'refresh': {
+        // Принудительная инвалидация серверного TTL-кэша: «обнови» должно
+        // показывать изменения с сайта (новые серии/озвучки) сразу, а не через
+        // до 5 минут жизни кэша.
+        clearSiteCache()
+        return NextResponse.json({ ok: true })
+      }
       case 'search': {
         const q = sp.get('q')?.trim()
         if (!q) return NextResponse.json({ error: 'Параметр q обязателен' }, { status: 400 })

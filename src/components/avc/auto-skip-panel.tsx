@@ -34,6 +34,9 @@ export function AutoSkipControls() {
   const updateSettings = useAvcStore((s) => s.updateSettings)
   const [open, setOpen] = useState(false)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** PUT шлёт только изменённые поля (см. SettingsDialog.pendingPatchRef) —
+   *  иначе касание панели автопропуска затирало весь settings устаревшей копией. */
+  const pendingPatchRef = useRef<Partial<AppSettings>>({})
 
   useEffect(() => {
     return () => {
@@ -44,12 +47,15 @@ export function AutoSkipControls() {
   /** Мгновенно в store, затем debounce → PUT /api/settings (как в SettingsDialog) */
   const change = (partial: Partial<AppSettings>) => {
     updateSettings(partial)
+    pendingPatchRef.current = { ...pendingPatchRef.current, ...partial }
     if (timerRef.current) clearTimeout(timerRef.current)
     timerRef.current = setTimeout(() => {
+      const patch = pendingPatchRef.current
+      pendingPatchRef.current = {}
       void fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(useAvcStore.getState().settings),
+        body: JSON.stringify(patch),
       }).catch(() => undefined)
     }, 600)
   }

@@ -125,6 +125,11 @@ export const LABELS: Record<VoiceCommandType, string> = {
   [VoiceCommandType.CheckAccount]: 'Проверить аккаунт',
   [VoiceCommandType.AccountLogout]: 'Выйти из аккаунта',
   [VoiceCommandType.AddVoiceAlias]: 'Добавить алиас озвучки',
+  [VoiceCommandType.RemoveWatchStatus]: 'Убрать из списка',
+  [VoiceCommandType.SkipSegment]: 'Пропустить опенинг/эндинг',
+  [VoiceCommandType.UndoSkip]: 'Вернуться до пропуска',
+  [VoiceCommandType.SetAutoSkip]: 'Настроить автопропуск',
+  [VoiceCommandType.MarkSegment]: 'Запомнить таймкод',
   [VoiceCommandType.Unknown]: 'Не распознано',
 }
 
@@ -214,6 +219,18 @@ function extractVolume(words: string[]): VoiceCommand | null {
     const vol = Math.min(100, parseInt(m[1], 10))
     return { type: VoiceCommandType.SetVolume, params: { volume: vol }, confidence: 0.95, label: `Громкость ${vol}%` }
   }
+  // «громкость сто», «громкость пятьдесят» — числительные словами (STT отдаёт
+  // слова, а не цифры; без этого фраза проваливалась в поиск аниме)
+  const idx = words.indexOf('громкость')
+  if (idx >= 0) {
+    const rest = words.slice(idx + 1, idx + 4)
+    for (let len = Math.min(3, rest.length); len >= 1; len--) {
+      const value = parseRussianNumber(rest.slice(0, len).join(' '))
+      if (value !== null && value >= 0 && value <= 100) {
+        return { type: VoiceCommandType.SetVolume, params: { volume: value }, confidence: 0.95, label: `Громкость ${value}%` }
+      }
+    }
+  }
   return null
 }
 
@@ -230,6 +247,14 @@ function extractTabNumber(words: string[]): VoiceCommand | null {
     const c = consumeLeadingNumber([words[idx - 1]])
     if (c) {
       return { type: VoiceCommandType.SelectTab, params: { index: c.value }, confidence: 0.9, label: `Вкладка ${c.value}` }
+    }
+  }
+  // «вкладка один», «вкладку вторая» — числительное-слово ПОСЛЕ слова вкладка
+  // (раньше не распознавалось и проваливалось в поиск аниме)
+  if (idx >= 0 && idx + 1 < words.length) {
+    const c = consumeLeadingNumber([words[idx + 1]])
+    if (c) {
+      return { type: VoiceCommandType.SelectTab, params: { index: c.value }, confidence: 0.92, label: `Вкладка ${c.value}` }
     }
   }
   return null
@@ -876,7 +901,11 @@ function parseSegment(segment: string, ctx: ParseCtx): VoiceCommand | null {
     words.every((w) => !/^\d+$/.test(w))
   ) {
     const query = words.join(' ').trim()
-    if (query.length >= 2) {
+    // Мусорный запрос: голосовой движок на дальнем микрофоне выдаёт обрывки
+    // («гу», «то», «на»), повторы слогов («на на на на») и наборы огрызков
+    // («какая ка кака»). Голый поиск по ним только мусорит историю и открывает
+    // случайные тайтлы — требуем осмысленный запрос.
+    if (query.length >= 3 && !isJunkQuery(words)) {
       return {
         type: VoiceCommandType.SearchAnime,
         params: { query, open: true },
@@ -887,6 +916,32 @@ function parseSegment(segment: string, ctx: ParseCtx): VoiceCommand | null {
   }
 
   return null
+}
+
+/** Похоже ли слово на обрывок/слог (1–2 буквы): «на», «то», «ка», «гу» */
+function isShortFillerWord(w: string): boolean {
+  return w.length <= 2
+}
+
+/**
+ * Мусорная фраза = маловероятное название аниме: повторы одного слова,
+ * преобладание слогов-обрывков, суммарно меньше 5 значимых букв.
+ * «наруто», «блич», «ван пис» — проходят; «на на на», «какая ка кака», «стой» — нет.
+ */
+function isJunkQuery(words: string[]): boolean {
+  if (words.length === 0) return true
+  const distinct = new Set(words)
+  // одно слово, повторённое несколько раз подряд — распознавательный мусор
+  if (distinct.size === 1 && words.length >= 2) return true
+  // 3+ слов из 1–2 различных — «на наруто наруто», «да да то»
+  if (distinct.size <= 2 && words.length >= 3) return true
+  const fillers = words.filter(isShortFillerWord).length
+  // почти вся фраза из обрывков: «какая ка кака» (2 из 3 — по сути слоги)
+  if (fillers >= Math.max(2, words.length - 1)) return true
+  // суммарно значимых букв меньше 5: «стой», «как», «гу то»
+  const meaningful = words.filter((w) => w.length >= 3).join('')
+  if (meaningful.length < 5) return true
+  return false
 }
 
 export interface ParseResult {

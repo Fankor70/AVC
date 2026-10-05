@@ -1369,8 +1369,11 @@ export async function executeCommand(cmd: VoiceCommand): Promise<CommandResult> 
     case VoiceCommandType.Reload: {
       const st = useAvcStore.getState()
       if (!st.activeTabId) return fail('Нет активной вкладки')
-      // Инвалидация клиентского кэша деталей — «Обновляю» должно дать живые данные
+      // Инвалидация клиентского кэша деталей — «Обновляю» должно дать живые данные.
+      // Плюс сброс СЕРВЕРНОГО TTL-кэша сайта (серии/озвучки/секции): изменения на
+      // сайте (новые серии) подтягиваются сразу, а не в пределах 5 минут кэша.
       invalidateDetailsCache()
+      void fetch('/api/site/refresh').catch(() => undefined)
       st.bumpReload(st.activeTabId)
       return ok('Обновляю страницу')
     }
@@ -1527,6 +1530,23 @@ export async function executeText(
   }
 
   const commands = parsed.commands
+
+  // Порог уверенности (Настройки → Голос): голосовые команды ниже порога не выполняются.
+  // Раньше настройка нигде не читалась — фоновая речь (радио/ТВ) распознавалась в мусор
+  // с 70% и выполнялась наравне с настоящими командами.
+  if (source === 'voice' && commands.length > 0) {
+    const threshold = useAvcStore.getState().settings.confidenceThreshold
+    const best = Math.max(...commands.map((c) => c.confidence))
+    if (Number.isFinite(threshold) && threshold > 0 && best < threshold) {
+      const r = fail(`Неверно распознано (${Math.round(best * 100)}% ниже порога ${Math.round(threshold * 100)}%) — повторите чётче`)
+      step('CONFIDENCE', `${Math.round(best * 100)}% < порога ${Math.round(threshold * 100)}%`)
+      step('RESULT', `✗ ${r.message}`)
+      const st = useAvcStore.getState()
+      st.setLastExecuted({ raw, result: r })
+      st.setVoiceMessage(r.message)
+      return { raw, normalized: parsed.normalized, commands: [], results: [r] }
+    }
+  }
 
   const results: CommandResult[] = []
 

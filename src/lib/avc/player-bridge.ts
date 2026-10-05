@@ -46,6 +46,7 @@
  * легализуют play() со звуком в кросс-доменном iframe без единого клика.
  */
 import type { PlaybackContext } from './types'
+import { useAvcStore } from './store'
 
 // --- команды родитель → плеер ----------------------------------------------------
 
@@ -67,6 +68,54 @@ export function playerWindowAvailable(): boolean {
   return activePlayerWindow !== null
 }
 
+// --- резервный клавиатурный канал (только EXE) ---------------------------------
+
+/** iframe-элемент плеера: нужен, чтобы поставить фокус перед инжекцией клавиш */
+let activePlayerElement: HTMLIFrameElement | null = null
+
+export function registerPlayerElement(el: HTMLIFrameElement | null): void {
+  activePlayerElement = el
+}
+
+/** Время последнего ЖИВОГО события от плеера (0 — событий ещё не было) */
+let lastPlayerEventAt = 0
+
+export function notePlayerActivity(): void {
+  lastPlayerEventAt = Date.now()
+}
+
+interface ElectronKeyBridge {
+  playerSendKey?: (keys: Array<{ keyCode: string }>) => Promise<boolean>
+}
+
+function electronKeyBridge(): ElectronKeyBridge['playerSendKey'] | null {
+  if (typeof window === 'undefined') return null
+  const api = (window as unknown as { avcElectron?: ElectronKeyBridge }).avcElectron
+  return typeof api?.playerSendKey === 'function' ? api.playerSendKey : null
+}
+
+/** События плеера считаем свежими 6 с: если дольше тишины — postMessage-канал,
+ *  вероятно, не работает (сменённый протокол/хост), и командуем клавишами. */
+function playerEventsStale(): boolean {
+  return lastPlayerEventAt === 0 || Date.now() - lastPlayerEventAt > 6000
+}
+
+async function sendKeysToPlayer(keys: string[]): Promise<void> {
+  try {
+    activePlayerElement?.focus({ preventScroll: true })
+  } catch {
+    /* кросс-доменный фокус может не удаться — не критично */
+  }
+  try {
+    ;(activePlayerWindow as Window | null)?.focus?.()
+  } catch {
+    /* как выше */
+  }
+  const send = electronKeyBridge()
+  if (!send) return
+  await send(keys.map((keyCode) => ({ keyCode })))
+}
+
 function postToPlayer(msg: Record<string, unknown>): boolean {
   const win = activePlayerWindow
   if (!win) return false
@@ -82,21 +131,32 @@ function postToPlayer(msg: Record<string, unknown>): boolean {
  *  (aksor-ключи + конверт kodik_player_api). false — плеер не открыт. */
 export function sendPlayerCommand(cmd: PlayerCommand): boolean {
   if (!activePlayerWindow) return false
+  // Резервный канал: если события от плеера давно не приходили (протокол сменился,
+  // посты не доходят) и мы в EXE — командуем настоящими нажатиями клавиш.
+  // ОБА канала сразу не используем: двойной play/pause = отмена действия.
+  const viaKeys = electronKeyBridge() !== null && playerEventsStale()
   switch (cmd.key) {
     case 'player_play':
-      return [
-        postToPlayer({ key: 'player_play' }),
-        postToPlayer({ key: 'kodik_player_api', value: { method: 'play' } }),
-      ].some(Boolean)
     case 'player_pause':
+      if (viaKeys) {
+        void sendKeysToPlayer([' '])
+        return true
+      }
       return [
-        postToPlayer({ key: 'player_pause' }),
-        postToPlayer({ key: 'kodik_player_api', value: { method: 'pause' } }),
+        postToPlayer({ key: cmd.key }),
+        postToPlayer({ key: 'kodik_player_api', value: { method: cmd.key === 'player_play' ? 'play' : 'pause' } }),
       ].some(Boolean)
     case 'player_seek': {
       // оба движка понимают АБСОЛЮТНУЮ секунду (сами клампят к длительности)
       if (!Number.isFinite(cmd.value)) return false
       const sec = Math.max(0, cmd.value)
+      if (viaKeys) {
+        const pb = useAvcStore.getState().playback
+        const delta = sec - (pb.currentTime || 0)
+        const presses = Math.max(1, Math.min(16, Math.round(Math.abs(delta) / 10)))
+        void sendKeysToPlayer(Array<string>(presses).fill(delta >= 0 ? 'ArrowRight' : 'ArrowLeft'))
+        return true
+      }
       return [
         postToPlayer({ key: 'player_seek', value: sec }),
         postToPlayer({ key: 'kodik_player_api', value: { method: 'seek', seconds: sec } }),

@@ -90,6 +90,11 @@ export function SettingsDialog() {
   const settings = useAvcStore((s) => s.settings)
   const updateSettings = useAvcStore((s) => s.updateSettings)
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Накопленный за debounce-окно частичный патч: PUT шлёт ТОЛЬКО изменённые поля.
+   *  Раньше уходил ВЕСЬ объект settings из store — если значение в БД поменялось
+   *  извне (второй экземпляр/правка мимо UI), первое же касание настроек затирало
+   *  его устаревшей копией из памяти. */
+  const pendingPatchRef = useRef<Partial<AppSettings>>({})
 
   useEffect(() => {
     return () => {
@@ -99,12 +104,15 @@ export function SettingsDialog() {
 
   const change = (partial: Partial<AppSettings>) => {
     updateSettings(partial)
+    pendingPatchRef.current = { ...pendingPatchRef.current, ...partial }
     if (timerRef.current) clearTimeout(timerRef.current)
     timerRef.current = setTimeout(() => {
+      const patch = pendingPatchRef.current
+      pendingPatchRef.current = {}
       void fetch('/api/settings', {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(useAvcStore.getState().settings),
+        body: JSON.stringify(patch),
       }).catch(() => undefined)
     }, 600)
   }
