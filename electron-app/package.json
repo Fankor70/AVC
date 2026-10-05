@@ -1,7 +1,7 @@
 {
   "name": "avc-anime",
   "productName": "AVC-Anime",
-  "version": "1.1.7",
+  "version": "1.1.8",
   "private": true,
   "description": "AVC-Anime — Anime Voice Control (YummyAnime voice-controlled client)",
   "main": "main.cjs",
